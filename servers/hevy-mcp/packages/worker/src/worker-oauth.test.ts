@@ -520,7 +520,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		);
 		expect(resource.status).toBe(200);
 		const resourceMetadata = (await resource.json()) as Record<string, unknown>;
-		expect(resourceMetadata.resource).toBe("https://worker.example/mcp");
+		expect(resourceMetadata.resource).toBe("https://worker.example");
 	});
 
 	it("keeps discovery paths returning 404 without OAUTH_KV", async () => {
@@ -774,7 +774,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		authorizeUrl.searchParams.set("state", "state-123");
 		authorizeUrl.searchParams.set("code_challenge", challenge);
 		authorizeUrl.searchParams.set("code_challenge_method", "S256");
-		authorizeUrl.searchParams.set("resource", "https://worker.example/mcp");
+		authorizeUrl.searchParams.set("resource", "https://worker.example");
 		const consent = await handler(new Request(authorizeUrl), env, {});
 		expect(consent.status).toBe(200);
 		const consentHtml = await consent.text();
@@ -813,7 +813,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 					redirect_uri: redirectUri,
 					client_id: client.client_id,
 					code_verifier: verifier,
-					resource: "https://worker.example/mcp",
+					resource: "https://worker.example",
 				}),
 			}),
 			env,
@@ -868,7 +868,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 					grant_type: "refresh_token",
 					refresh_token: tokens.refresh_token as string,
 					client_id: client.client_id,
-					resource: "https://worker.example/mcp",
+					resource: "https://worker.example",
 				}),
 			}),
 			env,
@@ -937,7 +937,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				),
 			),
 		);
-		const resource = "https://worker.example/mcp";
+		const resource = "https://worker.example";
 		const authorizeUrl = new URL("https://worker.example/authorize");
 		authorizeUrl.searchParams.set("response_type", "code");
 		authorizeUrl.searchParams.set("client_id", clientId);
@@ -1118,7 +1118,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		authorizeUrl.searchParams.set("state", "s");
 		authorizeUrl.searchParams.set("code_challenge", challenge);
 		authorizeUrl.searchParams.set("code_challenge_method", "S256");
-		authorizeUrl.searchParams.set("resource", "https://worker.example/mcp");
+		authorizeUrl.searchParams.set("resource", "https://worker.example");
 		const consentHtml = await (
 			await handler(new Request(authorizeUrl), env, {})
 		).text();
@@ -1149,7 +1149,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 						redirect_uri: redirectUri,
 						client_id: client.client_id,
 						code_verifier: verifier,
-						resource: "https://worker.example/mcp",
+						resource: "https://worker.example",
 					}),
 				}),
 				env,

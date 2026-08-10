@@ -477,10 +477,13 @@ function createWorkerOAuthProvider(
 
 /**
  * Lazily builds (and memoizes per canonical origin) the OAuth provider for
- * this Worker instance. Construction needs the deployment's own origin to
- * build `resourceMetadata.resource` (origin + `/mcp`), which is only known
- * once a request arrives — Cloudflare Workers don't expose environment
- * bindings at module-eval time, before any request has been handled.
+ * this Worker instance. Construction needs the deployment's own origin for
+ * `resourceMetadata.resource` — set to the bare origin, matching what
+ * Claude's client actually sends as the `resource` parameter (confirmed via
+ * live capture, not `${origin}/mcp` as the library's own unset-default would
+ * suggest) — which is only known once a request arrives, since Cloudflare
+ * Workers don't expose environment bindings at module-eval time, before any
+ * request has been handled.
  * Rebuilding is synchronous and cheap relative to a request, and
  * re-checking on every call safely tolerates a Worker route bound to more
  * than one hostname (custom domain plus `workers.dev`, or a preview alias)
@@ -496,7 +499,7 @@ function createOAuthProviderGetter(resolved: ResolvedWorkerDependencies) {
 		if (cached === null || cached.origin !== origin) {
 			cached = {
 				origin,
-				provider: createWorkerOAuthProvider(resolved, origin + MCP_PATH),
+				provider: createWorkerOAuthProvider(resolved, origin),
 			};
 		}
 		return cached.provider;

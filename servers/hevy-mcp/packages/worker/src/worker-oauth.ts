@@ -495,13 +495,12 @@ async function handleAuthorizedMcpRequest<Env>(
  * PKCE, CIMD client metadata with DCR fallback, and RFC 8414 / RFC 9728
  * discovery metadata for remote MCP clients including ChatGPT.
  *
- * `resourceUrl` must be this deployment's own canonical MCP endpoint URL
- * (this deployment's origin plus `/mcp` — the same value the library already
- * computed as its own default for discovery metadata when this option was
- * left unset). It is required by `enterpriseManagedAuthorization` below, and
- * it also switches `resource` parameter matching from a lenient origin-based
- * fallback to an exact match against this value for every client, not just
- * EMA ones.
+ * `resourceUrl` must be this deployment's own canonical origin (bare, no
+ * path) — matching what Claude's client actually sends as the `resource`
+ * parameter, confirmed via live capture. It is required by
+ * `enterpriseManagedAuthorization` below, and it also switches `resource`
+ * parameter matching from a lenient origin-based fallback to an exact match
+ * against this value for every client, not just EMA ones.
  */
 export function createHevyOAuthProvider<Env extends object>(
 	dependencies: HevyOAuthDependencies<Env>,
