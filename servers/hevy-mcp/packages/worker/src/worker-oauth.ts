@@ -494,9 +494,18 @@ async function handleAuthorizedMcpRequest<Env>(
  * namespace is bound. It implements OAuth 2.1 authorization code flow with
  * PKCE, CIMD client metadata with DCR fallback, and RFC 8414 / RFC 9728
  * discovery metadata for remote MCP clients including ChatGPT.
+ *
+ * `resourceUrl` must be this deployment's own canonical MCP endpoint URL
+ * (this deployment's origin plus `/mcp` — the same value the library already
+ * computed as its own default for discovery metadata when this option was
+ * left unset). It is required by `enterpriseManagedAuthorization` below, and
+ * it also switches `resource` parameter matching from a lenient origin-based
+ * fallback to an exact match against this value for every client, not just
+ * EMA ones.
  */
 export function createHevyOAuthProvider<Env extends object>(
 	dependencies: HevyOAuthDependencies<Env>,
+	resourceUrl: string,
 ): HevyOAuthWorker<Env> {
 	const provider = new OAuthProvider({
 		apiRoute: MCP_PATH,
@@ -535,7 +544,30 @@ export function createHevyOAuthProvider<Env extends object>(
 		refreshTokenTTL: OAUTH_REFRESH_TOKEN_TTL_SECONDS,
 		clientIdMetadataDocumentEnabled: true,
 		allowPlainPKCE: false,
-		resourceMetadata: { resource_name: "Hevy MCP Server" },
+		resourceMetadata: {
+			resource_name: "Hevy MCP Server",
+			resource: resourceUrl,
+		},
+		// Claude's CIMD client metadata document advertises
+		// urn:ietf:params:oauth:grant-type:jwt-bearer among its supported grant
+		// types (for enterprise-managed authorization on Claude's side), even
+		// though this server's connector flow only ever exercises
+		// authorization_code. The provider's CIMD validation rejects any client
+		// that advertises a grant type the server doesn't also advertise, so
+		// this must be present for Claude's custom connector to complete
+		// authorization at all. Every real jwt-bearer grant attempt is rejected
+		// (trustedIssuers never trusts an issuer), since this server has no
+		// actual enterprise SSO to offer — the stub exists purely to satisfy
+		// capability negotiation with a client that lists more grant types
+		// than it will ever use against this particular server.
+		enterpriseManagedAuthorization: {
+			trustedIssuers: async () => null,
+			mapClaims: async () => {
+				throw new Error(
+					"unreachable: trustedIssuers never trusts an issuer, so no jwt-bearer grant should reach claim mapping",
+				);
+			},
+		},
 	});
 	return provider as unknown as HevyOAuthWorker<Env>;
 }

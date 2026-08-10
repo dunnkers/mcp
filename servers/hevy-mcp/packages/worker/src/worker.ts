@@ -434,41 +434,73 @@ export function createWorkerHandler(dependencies: WorkerDependencies = {}) {
 
 function createWorkerOAuthProvider(
 	resolved: ResolvedWorkerDependencies,
+	resourceUrl: string,
 ): HevyOAuthWorker<WorkerEnv> {
-	return createHevyOAuthProvider<WorkerEnv>({
-		validateApiKey: async (apiKey, env, signal, deadline) => {
-			let hevyApiBaseUrl: string;
-			try {
-				hevyApiBaseUrl = resolveHevyApiBaseUrl(env.HEVY_API_BASE_URL);
-			} catch {
-				return "config-error";
-			}
-			return validateHevyApiKey(
-				apiKey,
-				hevyApiBaseUrl,
-				resolved.createValidationClient,
-				{
-					signal,
-					deadline: deadline ?? Date.now() + WORKER_INVOCATION_TIMEOUT_MS,
-				},
-			);
+	return createHevyOAuthProvider<WorkerEnv>(
+		{
+			validateApiKey: async (apiKey, env, signal, deadline) => {
+				let hevyApiBaseUrl: string;
+				try {
+					hevyApiBaseUrl = resolveHevyApiBaseUrl(env.HEVY_API_BASE_URL);
+				} catch {
+					return "config-error";
+				}
+				return validateHevyApiKey(
+					apiKey,
+					hevyApiBaseUrl,
+					resolved.createValidationClient,
+					{
+						signal,
+						deadline: deadline ?? Date.now() + WORKER_INVOCATION_TIMEOUT_MS,
+					},
+				);
+			},
+			serveMcp: async (request, env, apiKey, deadline) => {
+				let hevyApiBaseUrl: string;
+				try {
+					hevyApiBaseUrl = resolveHevyApiBaseUrl(env.HEVY_API_BASE_URL);
+				} catch {
+					return new Response("Worker configuration error", { status: 500 });
+				}
+				return serveMcpRequest(
+					request,
+					apiKey,
+					hevyApiBaseUrl,
+					resolved,
+					deadline ?? Date.now() + WORKER_INVOCATION_TIMEOUT_MS,
+				);
+			},
 		},
-		serveMcp: async (request, env, apiKey, deadline) => {
-			let hevyApiBaseUrl: string;
-			try {
-				hevyApiBaseUrl = resolveHevyApiBaseUrl(env.HEVY_API_BASE_URL);
-			} catch {
-				return new Response("Worker configuration error", { status: 500 });
-			}
-			return serveMcpRequest(
-				request,
-				apiKey,
-				hevyApiBaseUrl,
-				resolved,
-				deadline ?? Date.now() + WORKER_INVOCATION_TIMEOUT_MS,
-			);
-		},
-	});
+		resourceUrl,
+	);
+}
+
+/**
+ * Lazily builds (and memoizes per canonical origin) the OAuth provider for
+ * this Worker instance. Construction needs the deployment's own origin to
+ * build `resourceMetadata.resource` (origin + `/mcp`), which is only known
+ * once a request arrives — Cloudflare Workers don't expose environment
+ * bindings at module-eval time, before any request has been handled.
+ * Rebuilding is synchronous and cheap relative to a request, and
+ * re-checking on every call safely tolerates a Worker route bound to more
+ * than one hostname (custom domain plus `workers.dev`, or a preview alias)
+ * without needing per-origin cache eviction.
+ */
+function createOAuthProviderGetter(resolved: ResolvedWorkerDependencies) {
+	let cached: { origin: string; provider: HevyOAuthWorker<WorkerEnv> } | null =
+		null;
+	return function getOAuthProvider(
+		request: Request,
+	): HevyOAuthWorker<WorkerEnv> {
+		const origin = new URL(request.url).origin;
+		if (cached === null || cached.origin !== origin) {
+			cached = {
+				origin,
+				provider: createWorkerOAuthProvider(resolved, origin + MCP_PATH),
+			};
+		}
+		return cached.provider;
+	};
 }
 
 /**
@@ -485,7 +517,7 @@ export function createWorkerFetchHandler(
 ) {
 	const resolved = resolveWorkerDependencies(dependencies);
 	const legacyHandler = createWorkerHandler(dependencies);
-	const oauthProvider = createWorkerOAuthProvider(resolved);
+	const getOAuthProvider = createOAuthProviderGetter(resolved);
 
 	return async function handleWorkerFetch(
 		request: Request,
@@ -530,7 +562,7 @@ export function createWorkerFetchHandler(
 					responseStatus = legacyResponse.status;
 					return legacyResponse;
 				}
-				const oauthResponse = await oauthProvider.fetch(
+				const oauthResponse = await getOAuthProvider(request).fetch(
 					request,
 					env,
 					ctx ?? {},
@@ -539,7 +571,11 @@ export function createWorkerFetchHandler(
 				logOAuthResponse(logContext, responseStatus);
 				return withCors(oauthResponse, origin);
 			}
-			const oauthResponse = await oauthProvider.fetch(request, env, ctx ?? {});
+			const oauthResponse = await getOAuthProvider(request).fetch(
+				request,
+				env,
+				ctx ?? {},
+			);
 			responseStatus = oauthResponse.status;
 			logOAuthResponse(logContext, responseStatus);
 			return withCors(oauthResponse, origin);
