@@ -1,0 +1,10 @@
+codecov:
+  require_ci_to_pass: yes
+
+coverage:
+  status:
+    project: off
+    patch: off
+
+ignore:
+  - "packages/hevy-client/src/generated/**/*" # Ignore generated API output
