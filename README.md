@@ -13,3 +13,9 @@ Jeroen's MCP servers.
   deployed as a Cloudflare Worker. See
   [docs/marktplaats-mcp.md](docs/marktplaats-mcp.md) for setup and deploy
   details.
+- [`servers/vinted-mcp`](servers/vinted-mcp) — self-hosted
+  [Vinted](https://www.vinted.com) marketplace MCP server (upstream:
+  [andrijdavid/vinted-mcp](https://github.com/andrijdavid/vinted-mcp)),
+  with a [`worker/`](servers/vinted-mcp/worker) wrapper deployed as a
+  Cloudflare Worker. See [docs/vinted-mcp.md](docs/vinted-mcp.md) for setup
+  and deploy details.
