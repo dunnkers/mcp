@@ -1,0 +1,79 @@
+name: Canary Publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: .
+    env:
+      REGISTRY_URL: ${{ vars.NPM_REGISTRY_URL || 'https://registry.npmjs.org' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: ${{ env.REGISTRY_URL }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install TypeScript for build
+        run: npm install --no-save typescript
+
+      - name: Build and test
+        run: npm run build && npm run bundle && npm test
+
+      - name: Set canary version
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const pkgPath = 'package.json';
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+          const rawVersion = String(pkg.version || '').trim();
+
+          function normaliseSemverBase(version) {
+            const cleaned = version.replace(/^v/, '').split('+')[0].split('-')[0];
+            const match = cleaned.match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?$/);
+
+            if (!match) {
+              return '0.0.0';
+            }
+
+            const major = match[1] || '0';
+            const minor = match[2] || '0';
+            const patch = match[3] || '0';
+            return `${major}.${minor}.${patch}`;
+          }
+
+          const baseVersion = normaliseSemverBase(rawVersion);
+          const runNumber = process.env.GITHUB_RUN_NUMBER || '0';
+          const runAttempt = process.env.GITHUB_RUN_ATTEMPT || '1';
+          const canaryVersion = `${baseVersion}-next.${runNumber}.${runAttempt}`;
+
+          pkg.version = canaryVersion;
+          fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+          console.log(`Base version: ${rawVersion} -> ${baseVersion}`);
+          console.log(`Canary version: ${canaryVersion}`);
+          NODE
+
+      - name: Publish canary to registry
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ "$REGISTRY_URL" = "https://registry.npmjs.org" ]; then
+            npm publish --tag next --access public --provenance
+          else
+            npm publish --tag next
+          fi
