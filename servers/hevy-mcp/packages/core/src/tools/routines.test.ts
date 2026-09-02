@@ -1,17 +1,39 @@
 /* oxlint-disable typescript/unbound-method */
-import type { McpServer } from "@modelcontextprotocol/server";
+import type { JSONObject } from "@modelcontextprotocol/server";
 import type { HevyClient } from "@hevy-mcp/hevy-client";
+import {
+	createMockHevyClient,
+	createMockMcpServer,
+} from "../../test-fixtures/mock-hevy.js";
+import {
+	routinesGetDescriptor,
+	routinesListDescriptor,
+	workoutsGetDescriptor,
+	workoutsListDescriptor,
+	type HevyOperations,
+} from "@hevy-mcp/operations";
+import type { ToolExecutionContext } from "../execution.js";
+import type { McpToolResponse } from "../utils/response-contracts.js";
 import { HevyHttpError } from "@hevy-mcp/hevy-client";
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { getResultTelemetry } from "../utils/result-telemetry.js";
 import { createToolRuntime } from "./tool-runtime.js";
 import { registerToolDefinition } from "./define-tool.js";
 import { routineToolDefinitions } from "./routines.js";
 
-function register(client: HevyClient | null) {
-	const tool = vi.fn();
-	const server = { tool, registerTool: tool } as unknown as McpServer;
-	const runtime = createToolRuntime({ client, catalog: {} as never });
+function register(
+	client: HevyClient | null,
+	operations?: HevyOperations,
+	execution?: ToolExecutionContext,
+) {
+	const { server, registerTool: tool } = createMockMcpServer();
+	const runtime = createToolRuntime({
+		client,
+		operations,
+		execution,
+		catalog: {} as never,
+	});
 	for (const definition of routineToolDefinitions)
 		registerToolDefinition(server, runtime, definition);
 	return tool;
@@ -22,9 +44,7 @@ function handler(tool: { mock: { calls: unknown[][] } }, name: string) {
 		([registeredName]) => registeredName === name,
 	);
 	if (!call) throw new Error(`Tool ${name} was not registered`);
-	return call.at(-1) as (
-		args: Record<string, unknown>,
-	) => Promise<Record<string, unknown>>;
+	return call.at(-1) as (args: JSONObject) => Promise<McpToolResponse>;
 }
 
 const routineInput = {
@@ -43,15 +63,14 @@ const routineInput = {
 
 describe("routine tools", () => {
 	it("records expected telemetry for a missing routine", async () => {
-		const client = {
-			getRoutineById: vi.fn().mockRejectedValue(
-				new HevyHttpError("routine not found", {
-					status: 404,
-					method: "GET",
-					endpoint: "/v1/routines/:routineId",
-				}),
-			),
-		} as unknown as HevyClient;
+		const client = createMockHevyClient();
+		client.getRoutineById.mockRejectedValue(
+			new HevyHttpError("routine not found", {
+				status: 404,
+				method: "GET",
+				endpoint: "/v1/routines/:routineId",
+			}),
+		);
 		const tool = register(client);
 		const response = await handler(
 			tool,
@@ -67,12 +86,11 @@ describe("routine tools", () => {
 	});
 
 	it("maps pagination and identifiers to generated client calls", async () => {
-		const client = {
-			getRoutines: vi.fn().mockResolvedValue({ routines: [], page_count: 1 }),
-			getRoutineById: vi.fn().mockResolvedValue({
-				routine: { id: "r1", title: "Push", folder_id: 3, exercises: [] },
-			}),
-		} as unknown as HevyClient;
+		const client = createMockHevyClient();
+		client.getRoutines.mockResolvedValue({ routines: [], page_count: 1 });
+		client.getRoutineById.mockResolvedValue({
+			routine: { id: "r1", title: "Push", folder_id: 3, exercises: [] },
+		});
 		const tool = register(client);
 		await handler(tool, "get-routines")({ page: 2, page_size: 5 });
 		await handler(tool, "get-routine")({ routine_id: "r1" });
@@ -80,27 +98,99 @@ describe("routine tools", () => {
 		expect(client.getRoutineById).toHaveBeenCalledWith("r1");
 	});
 
+	it("uses the injected routines list operation and execution context", async () => {
+		const execute = vi.fn().mockResolvedValue({
+			items: [{ id: "r1", title: "Push", exercises: [] }],
+			page: 2,
+			pageCount: 3,
+		});
+		const operations = {
+			routines: {
+				get: { descriptor: routinesGetDescriptor, execute: vi.fn() },
+				list: { descriptor: routinesListDescriptor, execute },
+			},
+			workouts: {
+				get: { descriptor: workoutsGetDescriptor, execute: vi.fn() },
+				list: { descriptor: workoutsListDescriptor, execute: vi.fn() },
+			},
+		} satisfies HevyOperations;
+		const execution: ToolExecutionContext = {
+			signal: new AbortController().signal,
+			deadline: Date.now() + 5_000,
+		};
+		const tool = register(null, operations, execution);
+
+		const response = await handler(
+			tool,
+			"get-routines",
+		)({
+			page: 2,
+			page_size: 5,
+		});
+
+		expect(execute).toHaveBeenCalledWith({ page: 2, pageSize: 5 }, execution);
+		expect(response).toMatchObject({
+			structuredContent: {
+				routines: [{ id: "r1", title: "Push" }],
+				page: 2,
+				page_count: 3,
+			},
+		});
+	});
+
+	it("uses the injected routines get operation and execution context", async () => {
+		const execute = vi.fn().mockResolvedValue({
+			routine: { id: "r1", title: "Push", exercises: [] },
+		});
+		const operations = {
+			routines: {
+				get: { descriptor: routinesGetDescriptor, execute },
+				list: { descriptor: routinesListDescriptor, execute: vi.fn() },
+			},
+			workouts: {
+				get: { descriptor: workoutsGetDescriptor, execute: vi.fn() },
+				list: { descriptor: workoutsListDescriptor, execute: vi.fn() },
+			},
+		} satisfies HevyOperations;
+		const execution: ToolExecutionContext = {
+			signal: new AbortController().signal,
+			deadline: Date.now() + 5_000,
+		};
+		const tool = register(null, operations, execution);
+
+		const response = await handler(
+			tool,
+			"get-routine",
+		)({
+			routine_id: "r1",
+		});
+
+		expect(execute).toHaveBeenCalledWith({ routineId: "r1" }, execution);
+		expect(response).toMatchObject({
+			structuredContent: { routine: { id: "r1", title: "Push" } },
+		});
+	});
+
 	it("parses a routine whose exercise rest_seconds is an integer", async () => {
 		// Regression: the Hevy API returns rest_seconds as an integer, but the
 		// Routine read schema (and the get-routine output contract) previously
 		// typed it as a string, so output validation rejected every routine.
-		const client = {
-			getRoutineById: vi.fn().mockResolvedValue({
-				routine: {
-					id: "r1",
-					title: "Legs A",
-					exercises: [
-						{
-							index: 0,
-							title: "Hip Thrust (Barbell)",
-							exercise_template_id: "D57C2EC7",
-							rest_seconds: 120,
-							sets: [{ type: "normal", weight_kg: 22.68, reps: 12 }],
-						},
-					],
-				},
-			}),
-		} as unknown as HevyClient;
+		const client = createMockHevyClient();
+		client.getRoutineById.mockResolvedValue({
+			routine: {
+				id: "r1",
+				title: "Legs A",
+				exercises: [
+					{
+						index: 0,
+						title: "Hip Thrust (Barbell)",
+						exercise_template_id: "D57C2EC7",
+						rest_seconds: 120,
+						sets: [{ type: "normal", weight_kg: 22.68, reps: 12 }],
+					},
+				],
+			},
+		});
 		const tool = register(client);
 
 		const response = await handler(tool, "get-routine")({ routine_id: "r1" });
@@ -114,15 +204,14 @@ describe("routine tools", () => {
 	});
 
 	it("returns a standard error response for a bounded timeout", async () => {
-		const client = {
-			getRoutineById: vi.fn().mockRejectedValue(
-				new HevyHttpError("request timed out", {
-					method: "GET",
-					endpoint: "/v1/routines/:routineId",
-					code: "ETIMEDOUT",
-				}),
-			),
-		} as unknown as HevyClient;
+		const client = createMockHevyClient();
+		client.getRoutineById.mockRejectedValue(
+			new HevyHttpError("request timed out", {
+				method: "GET",
+				endpoint: "/v1/routines/:routineId",
+				code: "ETIMEDOUT",
+			}),
+		);
 		const tool = register(client);
 		const response = await handler(
 			tool,
@@ -134,11 +223,47 @@ describe("routine tools", () => {
 		expect(response).toMatchObject({ isError: true });
 	});
 
+	it("returns a confirmed acknowledgement when creation has no body", async () => {
+		const client = createMockHevyClient();
+		client.createRoutine.mockResolvedValue(undefined);
+		const tool = register(client);
+
+		const response = await handler(tool, "create-routine")(routineInput);
+
+		expect(response).toMatchObject({
+			structuredContent: {
+				created: true,
+				commit_state: "confirmed",
+				routine: null,
+				routine_id: null,
+				uses_rep_ranges: true,
+			},
+		});
+	});
+
+	it("returns the authoritative routine and ID when creation has a body", async () => {
+		const client = createMockHevyClient();
+		client.createRoutine.mockResolvedValue({
+			id: "routine-1",
+			title: "Push",
+			exercises: [],
+		});
+		const tool = register(client);
+
+		const response = await handler(tool, "create-routine")(routineInput);
+
+		expect(response.structuredContent).toMatchObject({
+			created: true,
+			commit_state: "confirmed",
+			routine_id: "routine-1",
+			routine: { id: "routine-1", title: "Push" },
+		});
+	});
+
 	it("passes nested snake_case routine payloads to create and update", async () => {
-		const client = {
-			createRoutine: vi.fn().mockResolvedValue(routineInput.routine),
-			updateRoutine: vi.fn().mockResolvedValue(routineInput.routine),
-		} as unknown as HevyClient;
+		const client = createMockHevyClient();
+		client.createRoutine.mockResolvedValue(routineInput.routine);
+		client.updateRoutine.mockResolvedValue(routineInput.routine);
 		const tool = register(client);
 
 		await handler(tool, "create-routine")(routineInput);
@@ -162,13 +287,78 @@ describe("routine tools", () => {
 		);
 	});
 
+	it("rejects empty routine exercises and sets before invoking the client", () => {
+		const client = createMockHevyClient();
+		const tool = register(client);
+		const invalidCases: Array<[string, JSONObject]> = [
+			["create-routine", { routine: { title: "Push", exercises: [] } }],
+			[
+				"update-routine",
+				{
+					routine_id: "r1",
+					routine: { title: "Push", exercises: [] },
+				},
+			],
+			[
+				"create-routine",
+				{
+					routine: {
+						title: "Push",
+						exercises: [{ exercise_template_id: "bench", sets: [] }],
+					},
+				},
+			],
+			[
+				"update-routine",
+				{
+					routine_id: "r1",
+					routine: {
+						title: "Push",
+						exercises: [{ exercise_template_id: "bench", sets: [] }],
+					},
+				},
+			],
+		];
+		for (const [name, args] of invalidCases) {
+			expect(() => handler(tool, name)(args)).toThrow();
+		}
+		expect(client.createRoutine).not.toHaveBeenCalled();
+		expect(client.updateRoutine).not.toHaveBeenCalled();
+	});
+
+	it("surfaces sanitized API validation detail for routine mutations", async () => {
+		const client = createMockHevyClient();
+		client.createRoutine.mockRejectedValue(
+			new HevyHttpError("request failed", {
+				status: 400,
+				method: "POST",
+				endpoint: "/v1/routines",
+				data: {
+					detail:
+						"Exercise template is invalid; Authorization: Bearer secret-token",
+				},
+			}),
+		);
+		const tool = register(client);
+
+		const response = await handler(tool, "create-routine")(routineInput);
+
+		expect(response).toMatchObject({ isError: true });
+		expect(response.content[0]?.text).toContain(
+			"Exercise template is invalid; Authorization: [REDACTED]",
+		);
+		expect(response.content[0]?.text).not.toContain("secret-token");
+	});
+
 	it("rejects legacy camelCase envelopes before invoking the client", () => {
-		const tool = register(null);
-		const definition = tool.mock.calls.find(
-			([name]) => name === "create-routine",
-		)?.[1] as { inputSchema: { parse(value: unknown): unknown } };
+		register(null);
+		const definition = routineToolDefinitions.find(
+			({ name }) => name === "create-routine",
+		);
+		if (!definition) throw new Error("create-routine definition is missing");
+		const inputSchema = z.strictObject(definition.inputSchema);
 		expect(() =>
-			definition.inputSchema.parse({
+			inputSchema.parse({
 				routine: { title: "Push", folderId: 3, exercises: [] },
 			}),
 		).toThrow();

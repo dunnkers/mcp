@@ -17,14 +17,17 @@ export default defineConfig({
 		// Kubb resolves output paths from the workspace process directory.
 		path: "./src/generated",
 		clean: true,
+		format: "oxfmt",
 	},
 	plugins: [
 		pluginOas({ output: { path: "./client" } }),
 		pluginTs({ output: { path: "./client/types" } }),
 		pluginClient({
 			output: { path: "./client/api" },
-			client: "fetch",
-			bundle: true,
+			// Keep the generated operations on the runtime-neutral client adapter.
+			// Kubb's bundled fetch template sets `credentials`, which Cloudflare's
+			// RequestInit intentionally does not support.
+			importPath: "../../../fetch.ts",
 		}),
 		pluginZod({ output: { path: "./client/schemas" } }),
 	],

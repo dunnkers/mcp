@@ -70,7 +70,8 @@
 					"packages/node/src/utils/config.test.ts",
 					"packages/core/src/tools/register.test.ts",
 					"packages/core/src/utils/output-schemas.test.ts",
-					"tests/unit/server-manifest.test.ts"
+					"tests/unit/server-manifest.test.ts",
+					"tests/contract/runtime-contract-matrix.test.ts"
 				]
 			},
 			"runtimes": ["node-24"],
@@ -88,6 +89,7 @@
 				"kind": "vitest",
 				"include": [
 					"packages/node/src/index.test.ts",
+					"packages/node/src/runtime.test.ts",
 					"packages/node/src/utils/stdio-observability.test.ts",
 					"packages/node/src/utils/graceful-shutdown.test.ts",
 					"packages/node/src/utils/graceful-shutdown.child-process.test.ts"
@@ -228,7 +230,6 @@
 		},
 		{
 			"id": "package-exports",
-			"alias": "check:exports",
 			"selector": {
 				"kind": "control-plane",
 				"check": "exports"
@@ -243,7 +244,6 @@
 		},
 		{
 			"id": "package-publint",
-			"alias": "check:publint",
 			"selector": {
 				"kind": "control-plane",
 				"check": "publint"
@@ -258,7 +258,6 @@
 		},
 		{
 			"id": "package-changesets",
-			"alias": "check:package-changesets",
 			"selector": {
 				"kind": "control-plane",
 				"check": "changesets"
@@ -495,6 +494,7 @@
 				"unit",
 				"contract",
 				"stdio",
+				"pack",
 				"cli",
 				"pack-cli",
 				"worker-bundle",
@@ -510,8 +510,10 @@
 		"release": {
 			"lanes": [
 				"build",
+				"server-manifest",
 				"release-unit",
 				"worker",
+				"pack",
 				"cli",
 				"pack-cli",
 				"package-publint",
@@ -521,6 +523,7 @@
 			],
 			"workflowRuntimes": {
 				"build": ["node-24"],
+				"server-manifest": ["node-24"],
 				"release-unit": ["node-24"],
 				"worker": ["node-24"]
 			},

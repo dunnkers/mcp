@@ -23,6 +23,34 @@ GROUP BY hevy.feature, mcp.tool.kind, mcp.tool.operation
 WHERE transport = "stdio"
 ```
 
+## Hosted Worker regional activity
+
+Hosted Worker MCP activity spans carry the deterministic pseudonymous
+`span.user.hash`, Cloudflare's edge `span.cloudflare.colo`, and, when
+available, bounded approximate request geography:
+`span.geo.locality.name`, `span.geo.locality.region`, and
+`span.geo.country.code`. A colo is the Cloudflare edge point of presence that
+processed the request; geography is IP-derived and is not verified residence.
+
+Use a scoped TraceQL metrics query to produce one row per user/locality pair:
+
+```text
+{ span.user.hash != nil && span.geo.locality.name != nil }
+| count_over_time() by (
+    span.geo.locality.name,
+    span.geo.locality.region,
+    span.geo.country.code,
+    span.user.hash
+  )
+```
+
+The production VictoriaMetrics path should use separate trace-derived metric
+profiles: user activity keeps `user_hash` plus locality, while tool usage keeps
+tool taxonomy plus locality and omits `user_hash`. This avoids a
+`user_hash × tool × locality` series explosion. Count distinct user hashes per
+locality for the selected window. Do not include raw client IP addresses, and
+do not save a per-user behavior history beyond the approved retention window.
+
 ## Tool reliability
 
 | Panel                       | Source                 | Grouping/filter                                                | Question answered                                             |
@@ -64,7 +92,10 @@ with placeholders; raw IDs never reach these panels.
 
 Approved application policy for these dashboards:
 
-- aggregate metrics: 90 days;
+- application aggregate metrics without a user pseudonym: 90 days;
+- trace-derived Worker usage metrics containing `user_hash` with locality:
+  30 days, with access limited to repository maintainers and the on-call
+  operator;
 - Sentry error events and OTel traces containing sanitized client metadata or
   bounded diagnostic details: 30 days;
 - correlation-ID troubleshooting views: 24 hours of access and no saved

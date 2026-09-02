@@ -1,16 +1,15 @@
 import { z } from "zod";
 import type {
 	GetV1WorkoutsEvents200,
-	GetV1WorkoutsWorkoutid200,
 	PostV1Workouts201,
 	PutV1WorkoutsWorkoutid200,
 } from "@hevy-mcp/hevy-client/types";
 import {
-	paginationShape,
+	paginationFields,
 	nonEmptyId,
-	replaceWorkoutExercisesInputShape,
-	updateWorkoutInputShape,
-	workoutInputShape,
+	replaceWorkoutExercisesInputFields,
+	updateWorkoutInputFields,
+	workoutInputFields,
 } from "./input-schemas.js";
 import type { ToolDefinition } from "./define-tool.js";
 import type { ToolRuntime } from "./tool-runtime.js";
@@ -26,15 +25,13 @@ import {
 	readOnlyAnnotations,
 	updateAnnotations,
 } from "../utils/tool-annotations.js";
+import { WORKOUT_PUT_REQUIRES_IS_PRIVATE } from "./hevy-quirks.js";
 
 import type { InferToolParams } from "../utils/tool-helpers.js";
 import { buildWorkoutUpdatePayload } from "./mutation-semantics.js";
-import {
-	isExpectedListPageNotFound,
-	isExpectedReadNotFound,
-} from "../utils/hevy-error-policy.js";
+import { isExpectedListPageNotFound } from "../utils/hevy-error-policy.js";
 
-const getWorkoutsSchema = paginationShape({
+const getWorkoutsSchema = paginationFields({
 	defaultPageSize: 5,
 	maxPageSize: 10,
 	integerPage: false,
@@ -45,18 +42,18 @@ const getWorkoutSchema = { workout_id: nonEmptyId } as const;
 type GetWorkoutParams = InferToolParams<typeof getWorkoutSchema>;
 
 const getWorkoutEventsSchema = {
-	...paginationShape({ defaultPageSize: 5, maxPageSize: 10 }),
+	...paginationFields({ defaultPageSize: 5, maxPageSize: 10 }),
 	since: z.string().default("1970-01-01T00:00:00Z"),
 } as const;
 type GetWorkoutEventsParams = InferToolParams<typeof getWorkoutEventsSchema>;
 
-const createWorkoutSchema = workoutInputShape;
+const createWorkoutSchema = workoutInputFields;
 type CreateWorkoutParams = InferToolParams<typeof createWorkoutSchema>;
 
-const updateWorkoutSchema = updateWorkoutInputShape;
+const updateWorkoutSchema = updateWorkoutInputFields;
 type UpdateWorkoutParams = InferToolParams<typeof updateWorkoutSchema>;
 
-const replaceWorkoutExercisesSchema = replaceWorkoutExercisesInputShape;
+const replaceWorkoutExercisesSchema = replaceWorkoutExercisesInputFields;
 type ReplaceWorkoutExercisesParams = InferToolParams<
 	typeof replaceWorkoutExercisesSchema
 >;
@@ -67,7 +64,7 @@ export const workoutToolDefinitions = [
 		feature: "workouts" as const,
 		operation: "list" as const,
 		description:
-			"Read-only. Lists compact workout summaries newest first. Use get-workout for exercises and sets; results are paginated.",
+			"Read-only. Lists compact workout summaries in Hevy API pagination order, not sorted by workout start_time. Use get-workout for exercises and sets; results are paginated.",
 		inputSchema: getWorkoutsSchema,
 		outputSchema: workoutsResponse.outputSchema,
 		annotations: readOnlyAnnotations("Get Workouts"),
@@ -96,21 +93,13 @@ export const workoutToolDefinitions = [
 		kind: "read" as const,
 		responseContract: workoutResponse,
 		execute: async (runtime: ToolRuntime, args: GetWorkoutParams) => {
-			try {
-				const data: GetV1WorkoutsWorkoutid200 = await runtime
-					.getClient()
-					.getWorkout(args.workout_id);
-				return { workout: data, workout_id: args.workout_id };
-			} catch (error) {
-				if (isExpectedReadNotFound(error)) {
-					return {
-						workout: null,
-						workout_id: args.workout_id,
-						expected404Outcome: "not_found",
-					};
-				}
-				throw error;
-			}
+			const data = await runtime
+				.getOperations()
+				.workouts.get.execute(
+					{ workoutId: args.workout_id },
+					runtime.execution,
+				);
+			return { ...data, workout_id: args.workout_id };
 		},
 	},
 	{
@@ -174,7 +163,9 @@ export const workoutToolDefinitions = [
 		feature: "workouts" as const,
 		operation: "update" as const,
 		description:
-			"Mutates workout metadata by ID. Omitted fields and all exercises remain unchanged.",
+			"Mutates workout metadata by ID. " +
+			WORKOUT_PUT_REQUIRES_IS_PRIVATE.updateClause +
+			"; omitted fields and all exercises otherwise remain unchanged.",
 		inputSchema: updateWorkoutSchema,
 		annotations: updateAnnotations("Update Workout"),
 		kind: "write" as const,
@@ -195,7 +186,9 @@ export const workoutToolDefinitions = [
 		feature: "workouts" as const,
 		operation: "update" as const,
 		description:
-			"Mutates a workout by replacing all exercises and sets. Workout metadata remains unchanged.",
+			"Mutates a workout by replacing all exercises and sets. " +
+			WORKOUT_PUT_REQUIRES_IS_PRIVATE.replaceExercisesClause +
+			"; other workout metadata remains unchanged.",
 		inputSchema: replaceWorkoutExercisesSchema,
 		annotations: updateAnnotations("Replace Workout Exercises"),
 		kind: "write" as const,
@@ -208,7 +201,7 @@ export const workoutToolDefinitions = [
 			const current = await client.getWorkout(args.workout_id);
 			const payload = buildWorkoutUpdatePayload(
 				current,
-				{},
+				{ is_private: args.workout.is_private },
 				args.workout.exercises,
 			);
 			const data: PutV1WorkoutsWorkoutid200 = await client.updateWorkout(

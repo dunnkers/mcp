@@ -1,5 +1,11 @@
 import type { ErrorEvent } from "@sentry/node";
-import type { Span } from "@opentelemetry/api";
+import { HevyHttpError } from "@hevy-mcp/hevy-client";
+import type { Span, SpanContext } from "@opentelemetry/api";
+type ScopeDouble = {
+	setTag: typeof testDoubles.setTag;
+	setContext: typeof testDoubles.setContext;
+	setFingerprint: typeof testDoubles.setFingerprint;
+};
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	captureFailure,
@@ -16,7 +22,7 @@ const testDoubles = vi.hoisted(() => ({
 }));
 
 vi.mock("@sentry/node", () => ({
-	withScope: vi.fn((callback: (scope: unknown) => unknown) =>
+	withScope: vi.fn((callback: (scope: ScopeDouble) => unknown) =>
 		callback({
 			setTag: testDoubles.setTag,
 			setContext: testDoubles.setContext,
@@ -34,13 +40,45 @@ vi.mock("@opentelemetry/api", () => ({
 }));
 
 const spanDoubles = {
+	addEvent: vi.fn(),
 	recordException: vi.fn(),
 	setAttributes: vi.fn(),
 	setAttribute: vi.fn(),
 	setStatus: vi.fn(),
-	spanContext: vi.fn(() => ({ traceId: "trace-id", spanId: "span-id" })),
 };
-const span = spanDoubles as unknown as Span;
+const spanContext: SpanContext = {
+	traceId: "trace-id",
+	spanId: "span-id",
+	traceFlags: 1,
+	isRemote: false,
+};
+const span: Span = {
+	spanContext: () => spanContext,
+	setAttribute: (...args: Parameters<Span["setAttribute"]>) => {
+		spanDoubles.setAttribute(...args);
+		return span;
+	},
+	setAttributes: (...args: Parameters<Span["setAttributes"]>) => {
+		spanDoubles.setAttributes(...args);
+		return span;
+	},
+	addEvent: (...args: Parameters<Span["addEvent"]>) => {
+		spanDoubles.addEvent(...args);
+		return span;
+	},
+	setStatus: (...args: Parameters<Span["setStatus"]>) => {
+		spanDoubles.setStatus(...args);
+		return span;
+	},
+	recordException: (...args: Parameters<Span["recordException"]>) => {
+		spanDoubles.recordException(...args);
+	},
+	end: vi.fn(),
+	addLink: vi.fn().mockReturnThis(),
+	addLinks: vi.fn().mockReturnThis(),
+	updateName: vi.fn().mockReturnThis(),
+	isRecording: vi.fn(() => true),
+};
 
 describe("failure reporter", () => {
 	beforeEach(() => {
@@ -49,14 +87,16 @@ describe("failure reporter", () => {
 
 	it("scrubs credentials, URLs, control characters, and home paths", () => {
 		const value =
-			"Bearer bearer-secret api-key=api-secret https://example.test/path?secret=1\n/home/alice/project\u0000";
+			"Bearer bearer-secret api-key=api-secret jane@example.com https://example.test/path?secret=1\n/home/alice/project\u0000";
 
 		const result = sanitizeDiagnosticText(value);
 
 		expect(result).not.toContain("bearer-secret");
 		expect(result).not.toContain("api-secret");
 		expect(result).not.toContain("https://example.test");
+		expect(result).not.toContain("jane@example.com");
 		expect(result).not.toContain("/home/alice");
+		expect(result).toContain("[EMAIL_REDACTED]");
 		expect(result).not.toContain("\u0000");
 		expect(result).toContain("[REDACTED]");
 	});
@@ -162,6 +202,36 @@ describe("failure reporter", () => {
 		});
 		expect(serialized).not.toContain("secret");
 		expect(serialized).not.toContain("/Users/alice");
+	});
+
+	it("keeps sanitized response diagnostics in context and failure events", () => {
+		const error = new HevyHttpError("request failed", {
+			status: 500,
+			method: "PUT",
+			endpoint: "/v1/workouts/:workoutId",
+			code: "HEVY_RETRY_EXHAUSTED",
+			data: {
+				message: "Invalid email jane@example.com; token=raw-token",
+			},
+		});
+
+		captureFailure(error, { kind: "api", span });
+
+		expect(testDoubles.setContext).toHaveBeenCalledWith(
+			"mcp",
+			expect.objectContaining({
+				"hevy.api.response_error":
+					"Invalid email [EMAIL_REDACTED]; token=[REDACTED]",
+			}),
+		);
+		expect(testDoubles.setTag).not.toHaveBeenCalledWith(
+			"hevy.api.response_error",
+			expect.anything(),
+		);
+		expect(spanDoubles.addEvent).toHaveBeenCalledWith("mcp.failure.detail", {
+			"hevy.api.response_error":
+				"Invalid email [EMAIL_REDACTED]; token=[REDACTED]",
+		});
 	});
 
 	it("captures one sanitized Sentry event and one owning OTel exception", () => {

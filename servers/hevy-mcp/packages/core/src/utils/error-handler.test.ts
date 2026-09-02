@@ -1,16 +1,28 @@
 import { describe, expect, it, vi } from "vitest";
-import { HevyHttpError } from "@hevy-mcp/hevy-client";
+import {
+	HEVY_REQUEST_ABORTED_ERROR_CODE,
+	HevyHttpError,
+} from "@hevy-mcp/hevy-client";
 import { ErrorType } from "./error-policy.js";
 import { createErrorResponse, withErrorHandling } from "./error-handler.js";
+import { SafeUserError } from "./safe-user-error.js";
 
-function httpError(status: number, data?: unknown, headers?: Headers) {
+type ErrorPayload = { readonly error: string };
+
+function httpError(
+	status: number,
+	data?: ErrorPayload,
+	headers?: Headers,
+	method = "GET",
+	endpoint = "/v1/user/info",
+) {
 	return new HevyHttpError(`HTTP ${status}`, {
 		status,
 		statusText: "Error",
 		data,
 		headers,
-		method: "GET",
-		endpoint: "/v1/user/info",
+		method,
+		endpoint,
 	});
 }
 
@@ -57,6 +69,23 @@ describe("createErrorResponse", () => {
 		}
 	});
 
+	it("renders caller cancellation as a client cancellation", () => {
+		const result = createErrorResponse(
+			new HevyHttpError("The request was canceled by the client.", {
+				method: "GET",
+				endpoint: "/v1/user/info",
+				code: HEVY_REQUEST_ABORTED_ERROR_CODE,
+				outcome: "cancelled",
+			}),
+			"get-user",
+		);
+
+		expect(result.content[0]?.text).toBe(
+			"[get-user] Error: The request was canceled by the client.",
+		);
+		expect(result.content[0]?.text).not.toContain("Hevy API request");
+	});
+
 	it("classifies the original error message when the safe message is generic", () => {
 		const result = createErrorResponse(
 			new Error("request validation failed"),
@@ -67,30 +96,75 @@ describe("createErrorResponse", () => {
 		});
 	});
 
+	it("only exposes explicitly safe user errors and bounds their messages", () => {
+		const longMessage = "validation failed ".repeat(100);
+		const result = createErrorResponse(new Error(longMessage), "test-tool");
+		const safeResult = createErrorResponse(
+			new SafeUserError(longMessage),
+			"test-tool",
+		);
+
+		expect(result.content[0]?.text).toBe(
+			"[test-tool] Error: The request failed unexpectedly. Please try again.",
+		);
+		expect(safeResult.content[0]?.text).toBe(
+			`[test-tool] Error: ${longMessage.slice(0, 512)}`,
+		);
+	});
+
+	it("gives routine update 404s actionable guidance", () => {
+		const result = createErrorResponse(
+			httpError(404, undefined, undefined, "PUT", "/v1/routines/:routineId"),
+		);
+		expect(result.content[0]?.text).toContain(
+			"The requested routine was not found in Hevy. It may have been deleted or the routine ID is incorrect.",
+		);
+	});
+
 	it.each([
 		[401, "The Hevy API key is invalid or has expired"],
 		[404, "The requested resource was not found"],
-		[409, "A conflict occurred"],
+		[400, "The request failed Hevy validation"],
+		[409, "A conflict occurred because the resource already exists"],
 		[422, "The request failed Hevy validation"],
 		[503, "Hevy API experienced an error"],
 	])("maps HTTP %s to a safe Hevy message", (status, expected) => {
 		const result = createErrorResponse(httpError(status));
 		expect(result.content[0]?.text).toContain(expected);
+		if (status === 409) {
+			expect(result.content[0]?.text).toBe(
+				"Error: A conflict occurred because the resource already exists or conflicts with the current server state. Check whether it already exists and use the update tool when appropriate.",
+			);
+		}
 	});
 
-	it("does not expose parsed upstream payloads for unmapped statuses", () => {
-		const secret = "upstream-secret-value";
-		const error = httpError(400, { error: secret });
-		error.message = secret;
-		error.code = secret;
-		const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-		const result = createErrorResponse(error);
-		expect(result.content[0]?.text).toContain(
-			"Hevy API request failed (HTTP 400)",
+	it("gives body measurement create conflicts actionable guidance", () => {
+		const result = createErrorResponse(
+			httpError(409, undefined, undefined, "POST", "/v1/body_measurements"),
 		);
-		expect(JSON.stringify(result)).not.toContain(secret);
-		expect(JSON.stringify(stderrSpy.mock.calls)).not.toContain(secret);
-		stderrSpy.mockRestore();
+		expect(result.content[0]?.text).toBe(
+			"Error: A body measurement already exists for this date. Use the update-body-measurement tool to modify it.",
+		);
+	});
+
+	it("surfaces only sanitized upstream validation detail", () => {
+		const secret = "Bearer upstream-secret-value";
+		const error = httpError(400, {
+			error: `Routine is invalid; Authorization: ${secret}`,
+		});
+		error.message = "untrusted raw message";
+		error.code = "untrusted-code";
+		const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const result = createErrorResponse(error);
+			expect(result.content[0]?.text).toContain(
+				"The request failed Hevy validation. Check the field values and try again. Detail: Routine is invalid; Authorization: [REDACTED]",
+			);
+			expect(JSON.stringify(result)).not.toContain(secret);
+			expect(JSON.stringify(stderrSpy.mock.calls)).not.toContain(secret);
+		} finally {
+			stderrSpy.mockRestore();
+		}
 	});
 
 	it("omits hostile HTTP metadata from retained debug context", () => {
@@ -194,7 +268,8 @@ describe("createErrorResponse", () => {
 	});
 
 	it("does not expose non-Error thrown values in client responses", () => {
-		const cyclic: Record<string, unknown> = {};
+		type CyclicThrownValue = { self?: CyclicThrownValue };
+		const cyclic: CyclicThrownValue = {};
 		cyclic.self = cyclic;
 		const cases: unknown[] = [
 			"Bearer secret-string",
@@ -225,16 +300,14 @@ describe("createErrorResponse", () => {
 describe("withErrorHandling", () => {
 	it("returns successful values unchanged", async () => {
 		const expected = { content: [{ type: "text" as const, text: "ok" }] };
-		const wrapped = withErrorHandling(async () => expected, "test");
+		const wrapped = withErrorHandling(() => Promise.resolve(expected), "test");
 		await expect(wrapped({})).resolves.toBe(expected);
 	});
 
 	it("normalizes nullish arguments and reports original failures", async () => {
 		const onError = vi.fn();
 		const wrapped = withErrorHandling(
-			async () => {
-				throw new Error("failed");
-			},
+			() => Promise.reject(new Error("failed")),
 			"test",
 			onError,
 		);
@@ -246,9 +319,7 @@ describe("withErrorHandling", () => {
 	it("does not replace normalized responses when observers fail", async () => {
 		const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const wrapped = withErrorHandling(
-			async () => {
-				throw new Error("original failure");
-			},
+			() => Promise.reject(new Error("original failure")),
 			"test",
 			() => {
 				throw new Error("observer secret");

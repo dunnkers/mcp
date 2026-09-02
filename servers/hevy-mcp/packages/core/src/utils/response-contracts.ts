@@ -15,12 +15,36 @@ import type {
 	Workout,
 } from "@hevy-mcp/hevy-client/types";
 import type { StructuredExecutionError } from "../execution.js";
-import { createSafeErrorDiagnostic } from "./safe-error-diagnostic.js";
 import {
 	attachResultTelemetry,
 	bucketCount,
 	type ToolResultTelemetry,
 } from "./result-telemetry.js";
+import {
+	createRoutineOutputSchema,
+	optionalNumber,
+	formattedBodyMeasurementSchema,
+	formattedDeletedWorkoutSchema,
+	formattedExerciseHistoryEntrySchema,
+	formattedExerciseTemplateSchema,
+	formattedRoutineFolderSchema,
+	formattedRoutineSchema,
+	formattedUpdatedWorkoutSchema,
+	formattedWorkoutSchema,
+	formattedWorkoutSummarySchema,
+	compactRoutineSchema,
+	scanSchema,
+	trainingSummarySessionSchema,
+} from "./output-schemas.js";
+import {
+	normalizeBodyMeasurement,
+	normalizeExerciseHistoryEntry,
+	projectRoutine,
+	projectRoutineFolder,
+	projectWorkout,
+	summarizeRoutine,
+	summarizeWorkout,
+} from "./formatters.js";
 
 /**
  * MCP tool response type aligned with MCP SDK CallToolResult while keeping
@@ -31,41 +55,48 @@ export type McpToolResponse = Omit<CallToolResult, "content"> & {
 	errorOutcome?: StructuredExecutionError;
 };
 
-type OutputShape = z.ZodRawShape;
-type OutputFor<TShape extends OutputShape> = z.output<z.ZodObject<TShape>>;
+type OutputFields = z.ZodRawShape;
+type JsonTextValue =
+	| string
+	| number
+	| boolean
+	| null
+	| readonly JsonTextValue[]
+	| { readonly [key: string]: JsonTextValue | undefined };
+type OutputFor<TFields extends OutputFields> = z.output<z.ZodObject<TFields>>;
 
 export interface StructuredResponseContract<
 	TData,
-	TShape extends OutputShape,
+	TFields extends OutputFields,
 > extends ResponseContract<TData> {
-	readonly outputSchema: TShape;
+	readonly outputSchema: TFields;
 }
 export interface ResponseContract<TData> {
 	render(data: TData): McpToolResponse;
 }
 
-interface StructuredContractDefinition<TData, TShape extends OutputShape> {
-	readonly outputSchema: TShape;
+interface StructuredContractDefinition<TData, TFields extends OutputFields> {
+	readonly outputSchema: TFields;
 	readonly normalize: (data: TData) => unknown;
-	readonly legacyJson: (output: OutputFor<TShape>) => unknown;
+	readonly legacyJson: (output: OutputFor<TFields>) => JsonTextValue;
 	readonly text?: (
 		data: TData,
-		output: OutputFor<TShape>,
+		output: OutputFor<TFields>,
 	) => string | undefined;
 	readonly additionalText?: (
 		data: TData,
-		output: OutputFor<TShape>,
+		output: OutputFor<TFields>,
 	) => readonly string[];
 	readonly telemetry?: (data: TData) => ToolResultTelemetry | undefined;
 }
 
 interface JsonContractPresentation {
-	readonly json?: unknown;
+	readonly json?: JsonTextValue;
 	readonly text?: string;
 	readonly additionalText?: readonly string[];
 }
 
-function jsonText(data: unknown): string {
+function jsonText(data: JsonTextValue): string {
 	return JSON.stringify(data, null, 2) ?? "null";
 }
 
@@ -74,11 +105,11 @@ function textContent(text: string): TextContent {
 }
 
 export function defineStructuredResponseContract<
-	const TShape extends OutputShape,
+	const TFields extends OutputFields,
 	TData,
 >(
-	definition: StructuredContractDefinition<TData, TShape>,
-): StructuredResponseContract<TData, TShape> {
+	definition: StructuredContractDefinition<TData, TFields>,
+): StructuredResponseContract<TData, TFields> {
 	return {
 		outputSchema: definition.outputSchema,
 		render(data) {
@@ -107,7 +138,7 @@ export function defineJsonResponseContract<TData>(
 	return {
 		render(data) {
 			const presentation = present(data);
-			const text = presentation.text ?? jsonText(presentation.json);
+			const text = presentation.text ?? jsonText(presentation.json ?? null);
 			const response: McpToolResponse = {
 				content: [
 					textContent(text),
@@ -128,128 +159,6 @@ export function respond<TData>(
 	return contract.render(data);
 }
 
-const optionalNumber = z.number().optional();
-
-export const formattedWorkoutSetSchema = z.object({
-	index: z.number().optional(),
-	type: z.string().optional(),
-	weight_kg: optionalNumber,
-	reps: optionalNumber,
-	distance_meters: optionalNumber,
-	duration_seconds: optionalNumber,
-	rpe: optionalNumber,
-	custom_metric: optionalNumber,
-});
-
-export const formattedWorkoutExerciseSchema = z.object({
-	index: z.number().optional(),
-	title: z.string().optional(),
-	exercise_template_id: z.string().optional(),
-	notes: z.string().optional(),
-	supersets_id: optionalNumber,
-	sets: z.array(formattedWorkoutSetSchema).optional(),
-});
-
-export const formattedWorkoutSchema = z.object({
-	id: z.string().optional(),
-	routine_id: z.string().optional(),
-	title: z.string().optional(),
-	description: z.string().optional(),
-	start_time: z.string().optional(),
-	end_time: z.string().optional(),
-	created_at: z.string().optional(),
-	updated_at: z.string().optional(),
-	duration: z.string(),
-	exercises: z.array(formattedWorkoutExerciseSchema).optional(),
-});
-
-export const formattedRoutineSetSchema = z.object({
-	index: z.number().optional(),
-	type: z.string().optional(),
-	weight_kg: optionalNumber,
-	reps: optionalNumber,
-	distance_meters: optionalNumber,
-	duration_seconds: optionalNumber,
-	custom_metric: optionalNumber,
-	rep_range: z
-		.object({
-			start: z.number().optional(),
-			end: z.number().optional(),
-		})
-		.optional(),
-	rpe: optionalNumber,
-});
-
-export const formattedRoutineExerciseSchema = z.object({
-	title: z.string().optional(),
-	index: z.number().optional(),
-	exercise_template_id: z.string().optional(),
-	notes: z.string().optional(),
-	supersets_id: optionalNumber,
-	rest_seconds: z.number().int().optional(),
-	sets: z.array(formattedRoutineSetSchema).optional(),
-});
-
-export const formattedRoutineSchema = z.object({
-	id: z.string().optional(),
-	title: z.string().optional(),
-	folder_id: z.number().optional(),
-	created_at: z.string().optional(),
-	updated_at: z.string().optional(),
-	exercises: z.array(formattedRoutineExerciseSchema).optional(),
-});
-
-export const formattedRoutineFolderSchema = z.object({
-	id: z.number().optional(),
-	title: z.string().optional(),
-	created_at: z.string().optional(),
-	updated_at: z.string().optional(),
-});
-
-export const formattedExerciseTemplateSchema = z.object({
-	id: z.string().optional(),
-	title: z.string().optional(),
-	type: z.string().optional(),
-	primary_muscle_group: z.string().optional(),
-	secondary_muscle_groups: z.array(z.string()).optional(),
-	is_custom: z.boolean().optional(),
-});
-
-export const formattedExerciseHistoryEntrySchema = z.object({
-	workout_id: z.string().optional(),
-	workout_title: z.string().optional(),
-	workout_start_time: z.string().optional(),
-	workout_end_time: z.string().optional(),
-	exercise_template_id: z.string().optional(),
-	weight_kg: optionalNumber,
-	reps: optionalNumber,
-	distance_meters: optionalNumber,
-	duration_seconds: optionalNumber,
-	rpe: optionalNumber,
-	custom_metric: optionalNumber,
-	set_type: z.string().optional(),
-});
-
-export const formattedBodyMeasurementSchema = z.object({
-	date: z.string(),
-	weight_kg: optionalNumber,
-	lean_mass_kg: optionalNumber,
-	fat_percent: optionalNumber,
-	neck_cm: optionalNumber,
-	shoulder_cm: optionalNumber,
-	chest_cm: optionalNumber,
-	left_bicep_cm: optionalNumber,
-	right_bicep_cm: optionalNumber,
-	left_forearm_cm: optionalNumber,
-	right_forearm_cm: optionalNumber,
-	abdomen: optionalNumber,
-	waist: optionalNumber,
-	hips: optionalNumber,
-	left_thigh_cm: optionalNumber,
-	right_thigh_cm: optionalNumber,
-	left_calf_cm: optionalNumber,
-	right_calf_cm: optionalNumber,
-});
 export interface WorkflowTelemetry {
 	name: "training-summary" | "routine-discovery";
 	pagination: Readonly<Record<string, number>>;
@@ -257,65 +166,6 @@ export interface WorkflowTelemetry {
 	itemsScanned: number;
 }
 
-export const scanSchema = z.object({
-	pages: z.record(z.string(), z.number().int().nonnegative()),
-	items: z.number().int().nonnegative(),
-});
-
-export const trainingSummarySessionSchema = z.object({
-	id: z.string().optional(),
-	title: z.string().optional(),
-	start_time: z.string().optional(),
-	end_time: z.string().optional(),
-	duration_seconds: z.number().int().nonnegative().optional(),
-	exercise_count: z.number().int().nonnegative(),
-	set_count: z.number().int().nonnegative(),
-});
-
-export const compactRoutineSchema = z.object({
-	id: z.string().optional(),
-	title: z.string().optional(),
-	folder_id: z.number().optional(),
-	updated_at: z.string().optional(),
-	exercise_count: z.number().int().nonnegative(),
-	set_count: z.number().int().nonnegative(),
-});
-
-export type FormattedWorkoutSet = z.infer<typeof formattedWorkoutSetSchema>;
-export type FormattedWorkoutExercise = z.infer<
-	typeof formattedWorkoutExerciseSchema
->;
-export type FormattedWorkout = z.infer<typeof formattedWorkoutSchema>;
-export type FormattedRoutineSet = z.infer<typeof formattedRoutineSetSchema>;
-export type FormattedRoutineExercise = z.infer<
-	typeof formattedRoutineExerciseSchema
->;
-export type FormattedRoutine = z.infer<typeof formattedRoutineSchema>;
-export type FormattedRoutineFolder = z.infer<
-	typeof formattedRoutineFolderSchema
->;
-export type FormattedExerciseTemplate = z.infer<
-	typeof formattedExerciseTemplateSchema
->;
-export type FormattedExerciseHistoryEntry = z.infer<
-	typeof formattedExerciseHistoryEntrySchema
->;
-export type FormattedBodyMeasurement = z.infer<
-	typeof formattedBodyMeasurementSchema
->;
-
-export const formattedWorkoutSummarySchema = z.object({
-	id: z.string().optional(),
-	title: z.string().optional(),
-	start_time: z.string().optional(),
-	end_time: z.string().optional(),
-	duration: z.string(),
-	exercise_count: z.number().int().nonnegative(),
-	set_count: z.number().int().nonnegative(),
-});
-export type FormattedWorkoutSummary = z.infer<
-	typeof formattedWorkoutSummarySchema
->;
 const paginationOutputSchema = {
 	page: z.number().int().positive(),
 	page_count: z.number().int().nonnegative().optional(),
@@ -344,15 +194,6 @@ const workoutOutputSchema = {
 	workout: formattedWorkoutSchema.nullable(),
 } as const;
 const workoutCountOutputSchema = { workout_count: z.number().int() } as const;
-export const formattedUpdatedWorkoutSchema = z.object({
-	type: z.literal("updated"),
-	workout: formattedWorkoutSchema,
-});
-export const formattedDeletedWorkoutSchema = z.object({
-	type: z.literal("deleted"),
-	id: z.string(),
-	deleted_at: z.string().optional(),
-});
 const workoutEventsOutputSchema = {
 	events: z.array(
 		z.union([formattedUpdatedWorkoutSchema, formattedDeletedWorkoutSchema]),
@@ -435,304 +276,6 @@ const compactRoutinesOutputSchema = {
 	scan: scanSchema,
 } as const;
 
-type ExerciseWithSupersetVariants = {
-	supersets_id?: number | null;
-	superset_id?: number | null;
-};
-
-function getSupersetId(exercise: ExerciseWithSupersetVariants): number | null {
-	if (exercise.superset_id !== undefined) {
-		return exercise.superset_id;
-	}
-
-	if (exercise.supersets_id !== undefined) {
-		return exercise.supersets_id;
-	}
-
-	return null;
-}
-
-/**
- * Project a workout into the sparse snake_case MCP contract.
- */
-export function projectWorkout(workout: Workout): FormattedWorkout {
-	return {
-		...(workout.id == null ? {} : { id: workout.id }),
-		...(workout.routine_id == null ? {} : { routine_id: workout.routine_id }),
-		...(workout.title == null ? {} : { title: workout.title }),
-		...(workout.description == null
-			? {}
-			: { description: workout.description }),
-		...(workout.start_time == null ? {} : { start_time: workout.start_time }),
-		...(workout.end_time == null ? {} : { end_time: workout.end_time }),
-		...(workout.created_at == null ? {} : { created_at: workout.created_at }),
-		...(workout.updated_at == null ? {} : { updated_at: workout.updated_at }),
-		duration: calculateDuration(workout.start_time, workout.end_time),
-		...(workout.exercises
-			? {
-					exercises: workout.exercises.map((exercise) => ({
-						...(exercise.index === undefined ? {} : { index: exercise.index }),
-						...(exercise.title == null ? {} : { title: exercise.title }),
-						...(exercise.exercise_template_id == null
-							? {}
-							: { exercise_template_id: exercise.exercise_template_id }),
-						...(exercise.notes == null ? {} : { notes: exercise.notes }),
-						...(getSupersetId(exercise) == null
-							? {}
-							: { supersets_id: getSupersetId(exercise) ?? undefined }),
-						...(exercise.sets
-							? {
-									sets: exercise.sets.map((set) => ({
-										...(set.index === undefined ? {} : { index: set.index }),
-										...(set.type == null ? {} : { type: set.type }),
-										...(set.weight_kg == null
-											? {}
-											: { weight_kg: set.weight_kg }),
-										...(set.reps == null ? {} : { reps: set.reps }),
-										...(set.distance_meters == null
-											? {}
-											: { distance_meters: set.distance_meters }),
-										...(set.duration_seconds == null
-											? {}
-											: { duration_seconds: set.duration_seconds }),
-										...(set.rpe == null ? {} : { rpe: set.rpe }),
-										...(set.custom_metric == null
-											? {}
-											: { custom_metric: set.custom_metric }),
-									})),
-								}
-							: {}),
-					})),
-				}
-			: {}),
-	};
-}
-
-export function summarizeWorkout(workout: Workout): FormattedWorkoutSummary {
-	const exercises = workout.exercises ?? [];
-	return {
-		...(workout.id == null ? {} : { id: workout.id }),
-		...(workout.title == null ? {} : { title: workout.title }),
-		...(workout.start_time == null ? {} : { start_time: workout.start_time }),
-		...(workout.end_time == null ? {} : { end_time: workout.end_time }),
-		duration: calculateDuration(workout.start_time, workout.end_time),
-		exercise_count: exercises.length,
-		set_count: exercises.reduce(
-			(total, exercise) => total + (exercise.sets?.length ?? 0),
-			0,
-		),
-	};
-}
-
-export function projectRoutine(routine: Routine): FormattedRoutine {
-	return {
-		...(routine.id == null ? {} : { id: routine.id }),
-		...(routine.title == null ? {} : { title: routine.title }),
-		...(routine.folder_id == null ? {} : { folder_id: routine.folder_id }),
-		...(routine.created_at == null ? {} : { created_at: routine.created_at }),
-		...(routine.updated_at == null ? {} : { updated_at: routine.updated_at }),
-		...(routine.exercises
-			? {
-					exercises: routine.exercises.map((exercise) => ({
-						...(exercise.title == null ? {} : { title: exercise.title }),
-						...(exercise.index === undefined ? {} : { index: exercise.index }),
-						...(exercise.exercise_template_id == null
-							? {}
-							: { exercise_template_id: exercise.exercise_template_id }),
-						...(exercise.notes == null ? {} : { notes: exercise.notes }),
-						...(getSupersetId(exercise) == null
-							? {}
-							: { supersets_id: getSupersetId(exercise) ?? undefined }),
-						...(exercise.rest_seconds == null
-							? {}
-							: { rest_seconds: exercise.rest_seconds }),
-						...(exercise.sets
-							? {
-									sets: exercise.sets.map((set) => {
-										const repRange = set.rep_range;
-										const normalizedRepRange =
-											repRange &&
-											(repRange.start != null || repRange.end != null)
-												? {
-														...(repRange.start == null
-															? {}
-															: { start: repRange.start }),
-														...(repRange.end == null
-															? {}
-															: { end: repRange.end }),
-													}
-												: undefined;
-										return {
-											...(set.index === undefined ? {} : { index: set.index }),
-											...(set.type == null ? {} : { type: set.type }),
-											...(set.weight_kg == null
-												? {}
-												: { weight_kg: set.weight_kg }),
-											...(set.reps == null ? {} : { reps: set.reps }),
-											...(normalizedRepRange
-												? { rep_range: normalizedRepRange }
-												: {}),
-											...(set.distance_meters == null
-												? {}
-												: { distance_meters: set.distance_meters }),
-											...(set.duration_seconds == null
-												? {}
-												: { duration_seconds: set.duration_seconds }),
-											...(set.rpe == null ? {} : { rpe: set.rpe }),
-											...(set.custom_metric == null
-												? {}
-												: { custom_metric: set.custom_metric }),
-										};
-									}),
-								}
-							: {}),
-					})),
-				}
-			: {}),
-	};
-}
-
-export function summarizeRoutine(
-	routine: Routine,
-): z.output<typeof compactRoutineSchema> {
-	const exercises = routine.exercises ?? [];
-	return {
-		...(routine.id == null ? {} : { id: routine.id }),
-		...(routine.title == null ? {} : { title: routine.title }),
-		...(routine.folder_id == null ? {} : { folder_id: routine.folder_id }),
-		...(routine.updated_at == null
-			? { updated_at: undefined }
-			: { updated_at: routine.updated_at }),
-		exercise_count: exercises.length,
-		set_count: exercises.reduce(
-			(total, exercise) => total + (exercise.sets?.length ?? 0),
-			0,
-		),
-	};
-}
-
-export function projectRoutineFolder(
-	folder: RoutineFolder,
-): FormattedRoutineFolder {
-	return {
-		id: folder.id,
-		title: folder.title,
-		created_at: folder.created_at,
-		updated_at: folder.updated_at,
-	};
-}
-
-export function calculateDuration(
-	startTime: string | number | null | undefined,
-	endTime: string | number | null | undefined,
-): string {
-	if (!startTime || !endTime) return "Unknown duration";
-
-	try {
-		const start = new Date(startTime);
-		const end = new Date(endTime);
-		if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
-			return "Unknown duration";
-		}
-		const durationMs = end.getTime() - start.getTime();
-		if (durationMs < 0) {
-			return "Invalid duration (end time before start time)";
-		}
-		const hours = Math.floor(durationMs / (1000 * 60 * 60));
-		const minutes = Math.floor((durationMs % (1000 * 60 * 60)) / (1000 * 60));
-		const seconds = Math.floor((durationMs % (1000 * 60)) / 1000);
-		return `${hours}h ${minutes}m ${seconds}s`;
-	} catch (error) {
-		console.error(
-			"Error calculating duration",
-			createSafeErrorDiagnostic(error),
-		);
-		return "Unknown duration";
-	}
-}
-
-export function normalizeExerciseHistoryEntry(
-	entry: ExerciseHistoryEntry,
-): FormattedExerciseHistoryEntry {
-	return {
-		...(entry.workout_id == null ? {} : { workout_id: entry.workout_id }),
-		...(entry.workout_title == null
-			? {}
-			: { workout_title: entry.workout_title }),
-		...(entry.workout_start_time == null
-			? {}
-			: { workout_start_time: entry.workout_start_time }),
-		...(entry.workout_end_time == null
-			? {}
-			: { workout_end_time: entry.workout_end_time }),
-		...(entry.exercise_template_id == null
-			? {}
-			: { exercise_template_id: entry.exercise_template_id }),
-		...(entry.weight_kg == null ? {} : { weight_kg: entry.weight_kg }),
-		...(entry.reps == null ? {} : { reps: entry.reps }),
-		...(entry.distance_meters == null
-			? {}
-			: { distance_meters: entry.distance_meters }),
-		...(entry.duration_seconds == null
-			? {}
-			: { duration_seconds: entry.duration_seconds }),
-		...(entry.rpe == null ? {} : { rpe: entry.rpe }),
-		...(entry.custom_metric == null
-			? {}
-			: { custom_metric: entry.custom_metric }),
-		...(entry.set_type == null ? {} : { set_type: entry.set_type }),
-	};
-}
-
-export function normalizeBodyMeasurement(
-	measurement: BodyMeasurement,
-): FormattedBodyMeasurement {
-	return {
-		date: measurement.date,
-		...(measurement.weight_kg == null
-			? {}
-			: { weight_kg: measurement.weight_kg }),
-		...(measurement.lean_mass_kg == null
-			? {}
-			: { lean_mass_kg: measurement.lean_mass_kg }),
-		...(measurement.fat_percent == null
-			? {}
-			: { fat_percent: measurement.fat_percent }),
-		...(measurement.neck_cm == null ? {} : { neck_cm: measurement.neck_cm }),
-		...(measurement.shoulder_cm == null
-			? {}
-			: { shoulder_cm: measurement.shoulder_cm }),
-		...(measurement.chest_cm == null ? {} : { chest_cm: measurement.chest_cm }),
-		...(measurement.left_bicep_cm == null
-			? {}
-			: { left_bicep_cm: measurement.left_bicep_cm }),
-		...(measurement.right_bicep_cm == null
-			? {}
-			: { right_bicep_cm: measurement.right_bicep_cm }),
-		...(measurement.left_forearm_cm == null
-			? {}
-			: { left_forearm_cm: measurement.left_forearm_cm }),
-		...(measurement.right_forearm_cm == null
-			? {}
-			: { right_forearm_cm: measurement.right_forearm_cm }),
-		...(measurement.abdomen == null ? {} : { abdomen: measurement.abdomen }),
-		...(measurement.waist == null ? {} : { waist: measurement.waist }),
-		...(measurement.hips == null ? {} : { hips: measurement.hips }),
-		...(measurement.left_thigh == null
-			? {}
-			: { left_thigh_cm: measurement.left_thigh }),
-		...(measurement.right_thigh == null
-			? {}
-			: { right_thigh_cm: measurement.right_thigh }),
-		...(measurement.left_calf == null
-			? {}
-			: { left_calf_cm: measurement.left_calf }),
-		...(measurement.right_calf == null
-			? {}
-			: { right_calf_cm: measurement.right_calf }),
-	};
-}
-
 type WorkoutEvent = GetV1WorkoutsEvents200["events"][number];
 
 function projectWorkoutEvent(event: WorkoutEvent) {
@@ -782,13 +325,13 @@ function routineResultTelemetry(
 	};
 }
 
-const SAFE_WORKFLOW_NAMES: Record<
-	string,
-	NonNullable<ToolResultTelemetry["workflow"]>["name"]
-> = {
+const SAFE_WORKFLOW_NAMES = {
 	"training-summary": "training-summary",
 	"routine-discovery": "routine-discovery",
-};
+} as const satisfies Record<
+	string,
+	NonNullable<ToolResultTelemetry["workflow"]>["name"]
+>;
 
 function workflowResultTelemetry(
 	workflow: WorkflowTelemetry,
@@ -1120,14 +663,17 @@ export const trainingSummaryResponse = defineStructuredResponseContract({
 		const { workflow, ...result } = data;
 		const { latest, earliest, weight_change_kg, ...body_measurements } =
 			result.body_measurements;
+		const normalizedBodyMeasurements: TrainingSummaryOutput["body_measurements"] =
+			{
+				...body_measurements,
+			};
+		if (latest) normalizedBodyMeasurements.latest = latest;
+		if (earliest) normalizedBodyMeasurements.earliest = earliest;
+		if (weight_change_kg != null)
+			normalizedBodyMeasurements.weight_change_kg = weight_change_kg;
 		return {
 			...result,
-			body_measurements: {
-				...body_measurements,
-				...(latest ? { latest } : {}),
-				...(earliest ? { earliest } : {}),
-				...(weight_change_kg == null ? {} : { weight_change_kg }),
-			},
+			body_measurements: normalizedBodyMeasurements,
 			scan: { pages: workflow.pagination, items: workflow.itemsScanned },
 		};
 	},
@@ -1148,12 +694,14 @@ export const compactRoutinesResponse = defineStructuredResponseContract({
 	outputSchema: compactRoutinesOutputSchema,
 	normalize: (data: CompactRoutinesResult) => {
 		const { workflow, ...result } = data;
+		const routines = result.routines.map((routine) => {
+			const normalized = { ...routine };
+			if (routine.folder_id == null) normalized.folder_id = undefined;
+			return normalized;
+		});
 		return {
 			...result,
-			routines: result.routines.map((routine) => ({
-				...routine,
-				...(routine.folder_id == null ? { folder_id: undefined } : {}),
-			})),
+			routines,
 			scan: { pages: workflow.pagination, items: workflow.itemsScanned },
 		};
 	},
@@ -1188,18 +736,23 @@ const repRangeDisplayWarningText =
 	"(input_modifier). See https://github.com/chrisdoc/hevy-mcp/issues/261 for " +
 	"details/workarounds.";
 
-export const createRoutineResponse = defineJsonResponseContract(
-	(data: { routine: Routine | null | undefined; usesRepRanges: boolean }) =>
-		data.routine
-			? {
-					json: projectRoutine(data.routine),
-					additionalText: data.usesRepRanges
-						? [repRangeDisplayWarningText]
-						: [],
-				}
-			: { text: "Failed to create routine: Server returned no data" },
-	(data) => routineResultTelemetry(data.routine),
-);
+export const createRoutineResponse = defineStructuredResponseContract({
+	outputSchema: createRoutineOutputSchema,
+	normalize: (data: {
+		routine: Routine | null | undefined;
+		usesRepRanges: boolean;
+	}) => ({
+		created: true as const,
+		commit_state: "confirmed" as const,
+		routine: data.routine ? projectRoutine(data.routine) : null,
+		routine_id: data.routine?.id ?? null,
+		uses_rep_ranges: data.usesRepRanges,
+	}),
+	legacyJson: (output) => output,
+	additionalText: (_data, output) =>
+		output.uses_rep_ranges ? [repRangeDisplayWarningText] : [],
+	telemetry: (data) => routineResultTelemetry(data.routine),
+});
 
 export const updateRoutineResponse = defineJsonResponseContract(
 	(data: {

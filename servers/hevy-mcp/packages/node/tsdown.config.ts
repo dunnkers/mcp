@@ -1,5 +1,6 @@
 /// <reference types="node" />
 import { readFileSync } from "node:fs";
+import { z } from "zod";
 import { codecovRollupPlugin } from "@codecov/rollup-plugin";
 import { sentryRollupPlugin } from "@sentry/rollup-plugin";
 import { defineConfig } from "tsdown";
@@ -44,8 +45,8 @@ if (process.env.HEVY_MCP_RELEASE === "true") {
 }
 
 if (
-	typeof name !== "string" ||
-	typeof version !== "string" ||
+	!z.string().safeParse(name).success ||
+	!z.string().safeParse(version).success ||
 	!name ||
 	!version
 ) {
@@ -55,6 +56,60 @@ if (
 		)}, version=${String(version)}`,
 	);
 }
+
+const packageName = name as string;
+const packageVersion = version as string;
+
+function createReleaseSentryPlugin() {
+	const [plugin] = sentryRollupPlugin({
+		org: process.env.SENTRY_ORG,
+		project: process.env.SENTRY_PROJECT,
+		authToken: process.env.SENTRY_AUTH_TOKEN,
+		telemetry: false,
+		sourcemaps: {
+			assets: ["./dist/**/*.mjs", "./dist/**/*.map"],
+			filesToDeleteAfterUpload: ["./dist/**/*.map"],
+		},
+		release: {
+			name: `${packageName}@${packageVersion}`,
+			inject: false,
+		},
+	});
+	if (!plugin) throw new Error("Sentry release plugin was not created");
+
+	const originalRenderChunk = plugin.renderChunk;
+	return {
+		...plugin,
+		renderChunk(
+			code: string,
+			chunk: { facadeModuleId?: string | null; moduleIds?: string[] },
+			options: Parameters<NonNullable<typeof originalRenderChunk>>[2],
+			meta: Parameters<NonNullable<typeof originalRenderChunk>>[3],
+		) {
+			const normalizeModuleId = (moduleId: string) =>
+				moduleId.replaceAll("\\", "/");
+			const isExecutableModule = (moduleId: string | null | undefined) => {
+				const normalized = moduleId && normalizeModuleId(moduleId);
+				return (
+					normalized === "src/cli.ts" ||
+					normalized?.endsWith("/src/cli.ts") ||
+					normalized === "src/runtime.ts" ||
+					normalized?.endsWith("/src/runtime.ts")
+				);
+			};
+			// The published package root is an embedding surface. Inject Sentry
+			// debug IDs into the executable entry and its lazy runtime chunk;
+			// shared chunks imported by the embedding entry must remain inert.
+			const isExecutableChunk = [
+				chunk.facadeModuleId,
+				...(chunk.moduleIds ?? []),
+			].some(isExecutableModule);
+			if (!isExecutableChunk) return null;
+			return originalRenderChunk?.call(this, code, chunk, options, meta);
+		},
+	};
+}
+
 export default defineConfig({
 	entry: isStandaloneBuild ? ["src/cli.ts"] : ["src/index.ts", "src/cli.ts"],
 	format: ["esm"],
@@ -100,7 +155,7 @@ export default defineConfig({
 	inputOptions: {
 		onLog(level, log, defaultHandler) {
 			if (
-				typeof log === "object" &&
+				z.object({}).passthrough().safeParse(log).success &&
 				log !== null &&
 				"code" in log &&
 				log.code === "SOURCEMAP_BROKEN"
@@ -111,21 +166,7 @@ export default defineConfig({
 		},
 	},
 	plugins: [
-		sentryRollupPlugin({
-			org: process.env.SENTRY_ORG,
-			project: process.env.SENTRY_PROJECT,
-			authToken: process.env.SENTRY_AUTH_TOKEN,
-			telemetry: false,
-			sourcemaps: {
-				assets: ["./dist/**/*.mjs", "./dist/**/*.map"],
-				...(isReleaseBuild
-					? { filesToDeleteAfterUpload: ["./dist/**/*.map"] }
-					: {}),
-			},
-			release: {
-				name: `${name}@${version}`,
-			},
-		}),
+		...(isReleaseBuild ? [createReleaseSentryPlugin()] : []),
 		...(enableCodecovBundleAnalysis
 			? codecovRollupPlugin({
 					enableBundleAnalysis: true,

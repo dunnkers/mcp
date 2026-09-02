@@ -1,6 +1,6 @@
 {
 	"name": "hevy-mcp",
-	"version": "6.0.0",
+	"version": "6.1.9",
 	"private": false,
 	"description": "A Model Context Protocol (MCP) server implementation that interfaces with the Hevy fitness tracking app and its API.",
 	"repository": {
@@ -29,7 +29,7 @@
 	},
 	"scripts": {
 		"build": "tsdown -c tsdown.config.ts",
-		"prepack": "node ../../scripts/server-manifest.mjs check && npm run build",
+		"prepack": "node ../../scripts/server-manifest.mjs check && pnpm run build",
 		"check:types": "tsc --noEmit -p tsconfig.json",
 		"build:standalone": "cross-env HEVY_MCP_BUILD_MODE=standalone tsdown -c tsdown.config.ts"
 	},
@@ -43,14 +43,15 @@
 		"@opentelemetry/sdk-metrics": "^2.10.0",
 		"@opentelemetry/sdk-trace-base": "^2.10.0",
 		"@opentelemetry/sdk-trace-node": "^2.10.0",
-		"@sentry/node": "^10.69.0",
+		"@sentry/node": "^10.70.0",
 		"semver": "^7.8.5",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
-		"@hevy-mcp/core": "*",
-		"@hevy-mcp/hevy-client": "*",
-		"@types/node": "^26.1.2",
+		"@hevy-mcp/core": "workspace:*",
+		"@hevy-mcp/hevy-client": "workspace:*",
+		"@sentry/core": "^10.71.0",
+		"@types/node": "^26.2.0",
 		"cross-env": "^10.1.0",
 		"tsdown": "^0.22.14",
 		"typescript": "^7.0.2"

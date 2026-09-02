@@ -1,4 +1,16 @@
-import type { RequestConfig, ResponseConfig } from "./generated/.kubb/fetch.ts";
+import { z } from "zod";
+
+const objectSchema = z.object({}).passthrough();
+const numberSchema = z.number();
+const stringSchema = z.string();
+const isObject = <T>(value: T): value is T & object =>
+	objectSchema.safeParse(value).success;
+const isNumber = <T>(value: T): value is T & number =>
+	numberSchema.safeParse(value).success;
+const isString = <T>(value: T): value is T & string =>
+	stringSchema.safeParse(value).success;
+
+import type { RequestConfig, ResponseConfig } from "./fetch.ts";
 import * as api from "./generated/client/api";
 import type {
 	GetV1BodyMeasurementsQueryParams,
@@ -11,7 +23,9 @@ import type {
 	PostV1BodyMeasurementsMutationRequest,
 	PostV1ExerciseTemplatesMutationRequest,
 	PostV1RoutineFoldersMutationRequest,
+	PostV1Routines201,
 	PostV1RoutinesMutationRequest,
+	Routine,
 	PostV1WorkoutsMutationRequest,
 	PutV1BodyMeasurementsDateMutationRequest,
 	PutV1RoutinesRoutineidMutationRequest,
@@ -25,6 +39,11 @@ import {
 	isHevyHttpError,
 } from "./hevy-http-error.js";
 import {
+	canonicalEndpointIdentity,
+	expectedGet404Outcome,
+	isTransientRetryFailure,
+} from "./endpoint-policy.js";
+import {
 	canRetryOperation,
 	commitStateFor,
 	createExecutionSignal,
@@ -37,6 +56,7 @@ import {
 	type HevyRequestOptions,
 	type HevyRequestPhase,
 } from "./execution.js";
+import { DEFAULT_RETRY_POLICY, getRetryDelayMs } from "./retry-policy.js";
 export interface HevyClientLogEvent {
 	readonly level: "debug" | "warning" | "error";
 	readonly logger: "hevy-api";
@@ -63,6 +83,13 @@ type KubbClient = {
 
 type InternalRequestControl = {
 	readonly hevyDeadline?: number;
+	readonly hevyTimeoutMs?: number;
+};
+type MutableRequest = {
+	hevyDeadline?: number;
+	hevyTimeoutMs?: number;
+	client: KubbClient;
+	signal?: AbortSignal;
 };
 
 export type HevyApiOutcome =
@@ -95,6 +122,8 @@ export interface HevyRequestObservation {
 		readonly status?: number;
 		readonly code?: string;
 		readonly category?: "HevyHttpError" | "NetworkError";
+		/** Bounded, sanitized text from an allowlisted upstream error field. */
+		readonly response_error?: string;
 	};
 }
 
@@ -127,41 +156,15 @@ export interface HevyClientOptions {
 	timeoutMs?: number;
 }
 
-export const DEFAULT_API_TIMEOUT_MS = 30_000;
+// Hevy's larger collection endpoints can take longer than the usual HTTP
+// request window, especially when returning exercise templates or workouts.
+export const DEFAULT_API_TIMEOUT_MS = 60_000;
 export const MAX_GET_RETRIES = 3;
-export const RETRY_BACKOFF_BASE_MS = 300;
+export { RETRY_BACKOFF_BASE_MS } from "./retry-policy.js";
 export { HEVY_RETRY_EXHAUSTED_ERROR_CODE };
 export { HEVY_REQUEST_ABORTED_ERROR_CODE };
 export { HEVY_DEADLINE_EXCEEDED_ERROR_CODE };
 
-const RETRY_BACKOFF_MAX_MS = 5_000;
-const RETRYABLE_STATUS_CODES = new Set([408, 429]);
-const SAFE_STATIC_ENDPOINTS = new Set([
-	"/v1/body_measurements",
-	"/v1/exercise_templates",
-	"/v1/routine_folders",
-	"/v1/routines",
-	"/v1/user/info",
-	"/v1/workouts",
-	"/v1/workouts/count",
-	"/v1/workouts/events",
-]);
-const EXPECTED_READ_404_ENDPOINTS = new Set([
-	"/v1/body_measurements/:date",
-	"/v1/exercise_history/:exerciseTemplateId",
-	"/v1/exercise_templates/:exerciseTemplateId",
-	"/v1/routine_folders/:folderId",
-	"/v1/routines/:routineId",
-	"/v1/workouts/:workoutId",
-]);
-const EXPECTED_LIST_404_ENDPOINTS = new Set([
-	"/v1/body_measurements",
-	"/v1/exercise_templates",
-	"/v1/routine_folders",
-	"/v1/routines",
-	"/v1/workouts",
-	"/v1/workouts/events",
-]);
 export const SAFE_OBSERVATION_CODES = new Set([
 	"EAI_AGAIN",
 	"ECONNABORTED",
@@ -176,15 +179,6 @@ export const SAFE_OBSERVATION_CODES = new Set([
 	HEVY_RETRY_EXHAUSTED_ERROR_CODE,
 	HEVY_DEADLINE_EXCEEDED_ERROR_CODE,
 ]);
-const SAFE_DYNAMIC_ENDPOINTS = [
-	["/v1/body_measurements/", "/v1/body_measurements/:date"],
-	["/v1/exercise_history/", "/v1/exercise_history/:exerciseTemplateId"],
-	["/v1/exercise_templates/", "/v1/exercise_templates/:exerciseTemplateId"],
-	["/v1/routine_folders/", "/v1/routine_folders/:folderId"],
-	["/v1/routines/", "/v1/routines/:routineId"],
-	["/v1/workouts/", "/v1/workouts/:workoutId"],
-] as const;
-
 function normalizePositiveInteger(value: number | undefined, fallback: number) {
 	return value === undefined || !Number.isFinite(value) || value <= 0
 		? fallback
@@ -219,7 +213,7 @@ function defaultSleep(
 			cleanup();
 			resolve();
 		};
-		const rejectSleep = (reason: unknown) => {
+		const rejectSleep = <T>(reason: T) => {
 			if (settled) return;
 			settled = true;
 			cleanup();
@@ -272,7 +266,7 @@ function withTimeout<T>(
 				signal?.removeEventListener("abort", onAbort);
 				resolve(value);
 			},
-			(error: unknown) => {
+			<T>(error: T) => {
 				if (settled) return;
 				settled = true;
 				if (timer !== undefined) clearTimeout(timer);
@@ -292,21 +286,12 @@ function getRequestContext(config: {
 	params?: unknown;
 }) {
 	const method = (config.method ?? "GET").toUpperCase();
-	const rawEndpoint = (config.url ?? "").split("?")[0] ?? "";
-	let endpoint = "unknown";
-	if (SAFE_STATIC_ENDPOINTS.has(rawEndpoint)) {
-		endpoint = rawEndpoint;
-	} else {
-		endpoint =
-			SAFE_DYNAMIC_ENDPOINTS.find(([prefix]) =>
-				rawEndpoint.startsWith(prefix),
-			)?.[1] ?? "unknown";
-	}
+	const endpoint = canonicalEndpointIdentity(config.url ?? "");
 	const page =
 		config.params !== null &&
-		typeof config.params === "object" &&
+		isObject(config.params) &&
 		"page" in config.params &&
-		typeof config.params.page === "number"
+		isNumber(config.params.page)
 			? config.params.page
 			: undefined;
 	return { method, endpoint, page };
@@ -393,34 +378,16 @@ function finishRetryWait(scope: HevyRetryWaitScope | undefined): void {
 	}
 }
 
-function parseRetryAfterMs(value: string | null): number | undefined {
-	if (!value) return undefined;
-	const seconds = Number(value);
-	if (Number.isFinite(seconds) && seconds >= 0) {
-		return Math.round(seconds * 1_000);
-	}
-	const dateMillis = Date.parse(value);
-	return Number.isNaN(dateMillis)
-		? undefined
-		: Math.max(0, dateMillis - Date.now());
-}
-
-function getRetryDelayMs(error: HevyHttpError, retryAttempt: number): number {
-	const exponential = Math.min(
-		RETRY_BACKOFF_MAX_MS,
-		RETRY_BACKOFF_BASE_MS * 2 ** Math.max(0, retryAttempt - 1),
-	);
-	const retryAfter =
-		error.status === 429
-			? parseRetryAfterMs(error.headers?.get("retry-after") ?? null)
-			: undefined;
-	if (retryAfter === undefined) return exponential;
-	// Keep the server's usable lower bound while adding bounded jitter to avoid
-	// a thundering herd when many callers receive the same Retry-After value.
-	const jitter = Math.floor(
-		Math.random() * Math.min(250, Math.max(1, retryAfter * 0.1)),
-	);
-	return Math.max(exponential, retryAfter) + jitter;
+function boundedRandomInt(maxExclusive: number): number {
+	if (maxExclusive <= 1) return 0;
+	const random = new Uint32Array(1);
+	const cryptoApi = (
+		globalThis as typeof globalThis & {
+			crypto: { getRandomValues(values: Uint32Array): Uint32Array };
+		}
+	).crypto;
+	cryptoApi.getRandomValues(random);
+	return Math.floor((random[0] / 2 ** 32) * maxExclusive);
 }
 
 function buildUrl(baseUrl: string, config: RequestConfig<unknown>): URL {
@@ -432,7 +399,7 @@ function buildUrl(baseUrl: string, config: RequestConfig<unknown>): URL {
 		});
 	}
 	const url = new URL(config.url, baseUrl);
-	if (config.params && typeof config.params === "object") {
+	if (config.params && isObject(config.params)) {
 		for (const [key, value] of Object.entries(config.params)) {
 			if (value !== undefined) {
 				url.searchParams.append(key, value === null ? "null" : String(value));
@@ -453,23 +420,14 @@ async function parseResponseData(response: Response): Promise<unknown> {
 	}
 }
 
-function getNetworkCode(error: unknown): string {
+function getNetworkCode<T>(error: T): string {
 	return error instanceof DOMException && error.name === "AbortError"
 		? "ETIMEDOUT"
 		: "ERR_NETWORK";
 }
 
 function isRetryable(error: HevyHttpError): boolean {
-	if (
-		error.code === HEVY_REQUEST_ABORTED_ERROR_CODE ||
-		error.code === HEVY_RETRY_EXHAUSTED_ERROR_CODE
-	)
-		return false;
-	return (
-		error.status === undefined ||
-		RETRYABLE_STATUS_CODES.has(error.status) ||
-		(error.status >= 500 && error.status <= 599)
-	);
+	return isTransientRetryFailure(error.status, error.code);
 }
 
 async function waitForRetry(
@@ -515,6 +473,7 @@ interface ExecutionErrorOptions {
 	phase: HevyRequestPhase;
 	deadlineExceeded: boolean;
 	canceled: boolean;
+	callerCanceled?: boolean;
 	responseConfirmed?: boolean;
 	code?: string;
 	cause?: unknown;
@@ -523,6 +482,7 @@ interface ExecutionErrorOptions {
 interface ExecutionFailureState {
 	deadlineExceeded: boolean;
 	canceled: boolean;
+	callerCanceled: boolean;
 	attemptTimedOut: boolean;
 }
 
@@ -539,21 +499,26 @@ function classifyExecutionFailure(
 		(attemptTimedOut &&
 			cause instanceof Error &&
 			cause.name === "TimeoutError");
+
+	const callerCanceled = executionSignal.aborted && !deadlineExceeded;
 	return {
 		deadlineExceeded,
-		canceled: executionSignal.aborted && !deadlineExceeded,
+		canceled: callerCanceled,
+		callerCanceled,
 		attemptTimedOut,
 	};
 }
 
 function createExecutionError(options: ExecutionErrorOptions): HevyHttpError {
-	const { deadlineExceeded, canceled } = options;
+	const { deadlineExceeded, canceled, callerCanceled = false } = options;
 	return new HevyHttpError(
 		deadlineExceeded
 			? "Hevy API request deadline exceeded"
-			: canceled
-				? "Hevy API request was canceled"
-				: "Hevy API network request failed",
+			: callerCanceled
+				? "The request was canceled by the client."
+				: canceled
+					? "Hevy API request was canceled"
+					: "Hevy API network request failed",
 		{
 			method: options.method,
 			endpoint: options.endpoint,
@@ -597,17 +562,42 @@ function applyExecutionMetadata(
 	});
 }
 
+/** Rebind caller-supplied errors to the sanitized request identity. */
+function normalizeHevyHttpError(
+	error: HevyHttpError,
+	method: string,
+	endpoint: string,
+): HevyHttpError {
+	const normalized = new HevyHttpError(error.message, {
+		status: error.status,
+		statusText: error.statusText,
+		data: error.data,
+		headers: error.headers,
+		method,
+		endpoint,
+		code: error.code,
+		cause: error.cause,
+		phase: error.phase,
+		operationSafety: error.operationSafety,
+		commitState: error.commitState,
+		safeToRetry: error.safeToRetry,
+		outcome: error.outcome,
+	});
+	normalized.hevyRetryCount = error.hevyRetryCount;
+	normalized.hevyRetryExhausted = error.hevyRetryExhausted;
+	return normalized;
+}
+
 function requestOptions(
 	options: HevyRequestOptions | undefined,
 	client: KubbClient,
 ): InternalRequestControl & { client: KubbClient; signal?: AbortSignal } {
-	return {
-		client,
-		...(options?.signal ? { signal: options.signal } : {}),
-		...(options?.deadline !== undefined
-			? { hevyDeadline: options.deadline }
-			: {}),
-	};
+	const request: MutableRequest = { client };
+	if (options?.signal) request.signal = options.signal;
+	if (options?.deadline !== undefined) request.hevyDeadline = options.deadline;
+	if (options?.timeoutMs !== undefined)
+		request.hevyTimeoutMs = options.timeoutMs;
+	return request;
 }
 
 interface RequestAttemptExecutionOptions {
@@ -618,7 +608,8 @@ interface RequestAttemptExecutionOptions {
 	method: string;
 	endpoint: string;
 	safety: HevyOperationSafety;
-	deadline: number;
+	/** Deadline for this attempt; each retry receives a fresh timeout window. */
+	attemptDeadline: number;
 	executionSignal: AbortSignal;
 	startedAt: number;
 	retryCount: number;
@@ -686,7 +677,7 @@ async function executeRequestAttempt<TData>(
 				phase = "dispatch";
 				const response = await withTimeout(
 					fetchPromise,
-					remainingDeadlineMs(options.deadline),
+					remainingDeadlineMs(options.attemptDeadline),
 					() =>
 						attemptController.abort(
 							new DOMException("Operation timed out", "TimeoutError"),
@@ -697,7 +688,7 @@ async function executeRequestAttempt<TData>(
 				phase = "response-content";
 				const data = await withTimeout(
 					parseResponseData(response),
-					remainingDeadlineMs(options.deadline),
+					remainingDeadlineMs(options.attemptDeadline),
 					() =>
 						attemptController.abort(
 							new DOMException("Operation timed out", "TimeoutError"),
@@ -761,9 +752,14 @@ interface AttemptFailureTransitionOptions {
 	phase: HevyRequestPhase;
 	responseConfirmed: boolean;
 	executionSignal: ReturnType<typeof createExecutionSignal>;
+	/** Overall operation deadline used for cancellation and retry backoff. */
 	deadline: number;
+	/** Deadline of the attempt that just failed. */
+	attemptDeadline: number;
 	retryCount: number;
 	maxGetRetries: number;
+	/** True only while executing the one allowed fresh-budget deadline retry. */
+	deadlineRetryActive?: boolean;
 	startedAt: number;
 	observationScope: HevyRequestObservationScope | undefined;
 	clientOptions: HevyClientOptions;
@@ -777,129 +773,178 @@ interface AttemptFailureTransition {
 	readonly retryWaitScope?: HevyRetryWaitScope;
 }
 
-/** Classify an attempt failure, emit its observation, and choose retry/backoff. */
-function transitionAfterAttemptFailure(
+function createAttemptFailureError(
 	options: AttemptFailureTransitionOptions,
-): AttemptFailureTransition {
-	const failure = classifyExecutionFailure(
-		options.cause,
-		options.executionSignal.signal,
-		options.deadline,
-		options.executionSignal.deadlineTriggered(),
-	);
-	const { deadlineExceeded, canceled, attemptTimedOut } = failure;
-	const error = isHevyHttpError(options.cause)
-		? options.cause
-		: createExecutionError({
-				method: options.method,
-				endpoint: options.endpoint,
-				safety: options.safety,
-				phase: options.phase,
-				deadlineExceeded,
-				canceled,
-				responseConfirmed: options.responseConfirmed,
-				code: attemptTimedOut ? "ETIMEDOUT" : getNetworkCode(options.cause),
-				cause: options.cause,
-			});
-	const safeToRetry =
-		!deadlineExceeded &&
-		!canceled &&
+	failure: ExecutionFailureState,
+): HevyHttpError {
+	if (isHevyHttpError(options.cause)) {
+		return normalizeHevyHttpError(
+			options.cause,
+			options.method,
+			options.endpoint,
+		);
+	}
+	return createExecutionError({
+		method: options.method,
+		endpoint: options.endpoint,
+		safety: options.safety,
+		phase: options.phase,
+		deadlineExceeded: failure.deadlineExceeded,
+		canceled: failure.canceled,
+		callerCanceled: failure.callerCanceled,
+		responseConfirmed: options.responseConfirmed,
+		code: failure.attemptTimedOut ? "ETIMEDOUT" : getNetworkCode(options.cause),
+		cause: options.cause,
+	});
+}
+
+function canRetryAttempt(
+	options: AttemptFailureTransitionOptions,
+	failure: ExecutionFailureState,
+	error: HevyHttpError,
+): boolean {
+	if (options.deadlineRetryActive) return false;
+	const deadlineRetry =
+		options.safety === "read" &&
+		options.retryCount === 0 &&
+		options.maxGetRetries > 0;
+	if (
+		failure.deadlineExceeded ||
+		error.code === HEVY_DEADLINE_EXCEEDED_ERROR_CODE
+	) {
+		return deadlineRetry;
+	}
+	return (
+		!failure.canceled &&
 		options.safety !== "non-idempotent-write" &&
 		canRetryOperation(options.safety, options.phase) &&
 		isRetryable(error) &&
-		remainingDeadlineMs(options.deadline) > 0;
-	const commitState =
-		error.commitState ??
-		commitStateFor(options.safety, options.phase, options.responseConfirmed);
-	applyExecutionMetadata(
-		error,
-		options.phase,
-		options.safety,
-		commitState,
-		safeToRetry,
-		deadlineExceeded
-			? "deadline_exceeded"
-			: canceled
-				? "cancelled"
-				: "terminal_failure",
+		remainingDeadlineMs(options.deadline) > 0
 	);
-	const expectedReason =
-		error.status === 404 &&
-		options.method === "GET" &&
-		EXPECTED_READ_404_ENDPOINTS.has(options.endpoint)
-			? "not_found"
-			: error.status === 404 &&
-				  options.method === "GET" &&
-				  options.page !== undefined &&
-				  options.page > 1 &&
-				  EXPECTED_LIST_404_ENDPOINTS.has(options.endpoint)
-				? "end_of_list"
-				: undefined;
-	const retryExhausted =
-		safeToRetry && options.retryCount >= options.maxGetRetries;
-	if (retryExhausted) {
-		error.hevyRetryExhausted = true;
-		error.hevyRetryCount = options.retryCount;
-		error.code = HEVY_RETRY_EXHAUSTED_ERROR_CODE;
-		error.setExecutionMetadata({
-			phase: error.phase,
-			operationSafety: error.operationSafety,
-			commitState: error.commitState,
-			safeToRetry: false,
-			outcome: "terminal_failure",
-		});
-	}
-	const observationOutcome: HevyApiOutcome = expectedReason
-		? "expected"
-		: deadlineExceeded
-			? "deadline_exceeded"
-			: canceled
-				? "cancelled"
-				: safeToRetry && !retryExhausted
-					? "retryable_failure"
-					: "terminal_failure";
-	const observation: HevyRequestObservation = {
+}
+
+function failureMetadataOutcome(
+	failure: ExecutionFailureState,
+): HevyApiOutcome {
+	if (failure.deadlineExceeded) return "deadline_exceeded";
+	if (failure.canceled) return "cancelled";
+	return "terminal_failure";
+}
+
+function applyRetryExhaustion(
+	error: HevyHttpError,
+	options: AttemptFailureTransitionOptions,
+	safeToRetry: boolean,
+): boolean {
+	if (!safeToRetry || options.retryCount < options.maxGetRetries) return false;
+	error.hevyRetryExhausted = true;
+	error.hevyRetryCount = options.retryCount;
+	error.code = HEVY_RETRY_EXHAUSTED_ERROR_CODE;
+	error.setExecutionMetadata({
+		phase: error.phase,
+		operationSafety: error.operationSafety,
+		commitState: error.commitState,
+		safeToRetry: false,
+		outcome: "terminal_failure",
+	});
+	return true;
+}
+
+function failureObservationOutcome(
+	failure: ExecutionFailureState,
+	expectedReason: HevyRequestObservation["expectedReason"],
+	safeToRetry: boolean,
+	retryExhausted: boolean,
+): HevyApiOutcome {
+	if (expectedReason) return "expected";
+	if (failure.deadlineExceeded) return "deadline_exceeded";
+	if (failure.canceled) return "cancelled";
+	if (safeToRetry && !retryExhausted) return "retryable_failure";
+	return "terminal_failure";
+}
+
+function createFailureObservation(
+	options: AttemptFailureTransitionOptions,
+	failure: ExecutionFailureState,
+	error: HevyHttpError,
+	commitState: HevyCommitState,
+	safeToRetry: boolean,
+	retryExhausted: boolean,
+	expectedReason: HevyRequestObservation["expectedReason"],
+): HevyRequestObservation {
+	const observation: Omit<
+		HevyRequestObservation,
+		"expectedReason" | "error"
+	> & {
+		expectedReason?: HevyRequestObservation["expectedReason"];
+		error?: {
+			status?: number;
+			code?: string;
+			category?: "HevyHttpError" | "NetworkError";
+			response_error?: string;
+		};
+	} = {
 		method: options.method,
 		endpoint: options.endpoint,
 		status: error.status ?? 0,
 		durationMs: Date.now() - options.startedAt,
 		retryCount: options.retryCount,
-		outcome: observationOutcome,
+		outcome: failureObservationOutcome(
+			failure,
+			expectedReason,
+			safeToRetry,
+			retryExhausted,
+		),
 		phase: options.phase,
 		operationSafety: options.safety,
 		commitState,
 		safeToRetry: safeToRetry && !retryExhausted,
-		...(expectedReason ? { expectedReason } : {}),
 		error: {
 			status: error.status,
 			code:
-				typeof error.code === "string" && SAFE_OBSERVATION_CODES.has(error.code)
+				isString(error.code) && SAFE_OBSERVATION_CODES.has(error.code)
 					? error.code
 					: undefined,
 			category: error.status === undefined ? "NetworkError" : "HevyHttpError",
 		},
 	};
-	finishRequestObservation(options.observationScope, observation);
-	emitRequestObservation(options.clientOptions.onRequestComplete, observation);
-	if (expectedReason || !safeToRetry || retryExhausted) {
-		emitClientLog(options.clientOptions.onLog, {
-			level: "error",
-			logger: "hevy-api",
-			data: {
-				message: "Hevy API request failed",
-				status: error.status ?? null,
-				method: options.method,
-				endpoint: options.endpoint,
-			},
-		});
-		return {
-			retry: false,
-			error,
-			retryCount: options.retryCount,
+	if (expectedReason) observation.expectedReason = expectedReason;
+	if (error.responseError && observation.error) {
+		observation.error = {
+			...observation.error,
+			response_error: error.responseError,
 		};
 	}
+	return observation;
+}
+
+function emitTerminalFailureLog(
+	options: AttemptFailureTransitionOptions,
+	error: HevyHttpError,
+): void {
+	emitClientLog(options.clientOptions.onLog, {
+		level: "error",
+		logger: "hevy-api",
+		data: {
+			message: "Hevy API request failed",
+			status: error.status ?? null,
+			method: options.method,
+			endpoint: options.endpoint,
+		},
+	});
+}
+
+function createRetryTransition(
+	options: AttemptFailureTransitionOptions,
+	error: HevyHttpError,
+): AttemptFailureTransition {
 	const retryCount = options.retryCount + 1;
-	const delayMs = getRetryDelayMs(error, retryCount);
+	const delayMs = getRetryDelayMs(
+		error,
+		retryCount,
+		DEFAULT_RETRY_POLICY,
+		boundedRandomInt,
+	);
 	emitClientLog(options.clientOptions.onLog, {
 		level: error.status === 429 ? "warning" : "debug",
 		logger: "hevy-api",
@@ -927,6 +972,59 @@ function transitionAfterAttemptFailure(
 	};
 }
 
+/** Classify an attempt failure, emit its observation, and choose retry/backoff. */
+function transitionAfterAttemptFailure(
+	options: AttemptFailureTransitionOptions,
+): AttemptFailureTransition {
+	const failure = classifyExecutionFailure(
+		options.cause,
+		options.executionSignal.signal,
+		options.attemptDeadline,
+		options.executionSignal.deadlineTriggered() ||
+			isDeadlineExceeded(options.attemptDeadline),
+	);
+	const error = createAttemptFailureError(options, failure);
+	const safeToRetry = canRetryAttempt(options, failure, error);
+	const commitState =
+		error.commitState ??
+		commitStateFor(options.safety, options.phase, options.responseConfirmed);
+	applyExecutionMetadata(
+		error,
+		options.phase,
+		options.safety,
+		commitState,
+		safeToRetry,
+		failureMetadataOutcome(failure),
+	);
+	const expectedReason = expectedGet404Outcome(
+		options.endpoint,
+		options.method,
+		error.status,
+		options.page,
+	);
+	const retryExhausted = applyRetryExhaustion(error, options, safeToRetry);
+	const observation = createFailureObservation(
+		options,
+		failure,
+		error,
+		commitState,
+		safeToRetry,
+		retryExhausted,
+		expectedReason,
+	);
+	finishRequestObservation(options.observationScope, observation);
+	emitRequestObservation(options.clientOptions.onRequestComplete, observation);
+	if (expectedReason || !safeToRetry || retryExhausted) {
+		emitTerminalFailureLog(options, error);
+		return {
+			retry: false,
+			error,
+			retryCount: options.retryCount,
+		};
+	}
+	return createRetryTransition(options, error);
+}
+
 function createNativeClient(
 	apiKey: string,
 	baseUrl: string,
@@ -952,19 +1050,35 @@ function createNativeClient(
 		const url = buildUrl(baseUrl, normalized);
 		// The HTTP method is authoritative for operation safety and retry policy.
 		const safety = operationSafetyForMethod(method);
-		// `timeoutMs` is the default logical-operation budget. Establish its
-		// absolute deadline once so retries and response-body consumption cannot
-		// each restart a fresh timeout window.
-		const deadline = normalized.hevyDeadline ?? Date.now() + timeoutMs;
-		const executionSignal = createExecutionSignal({
+		// `timeoutMs` is the default per-attempt budget. The overall operation
+		// deadline expands to accommodate all retries. A read may get one
+		// fresh attempt budget after timing out, bounded by `operationDeadline`.
+		// An explicit caller deadline remains authoritative — no retry extends
+		// beyond it, so the deadline retry is disabled in that case.
+		const operationTimeoutMs = normalizePositiveInteger(
+			normalized.hevyTimeoutMs,
+			timeoutMs,
+		);
+		const operationStartedAt = Date.now();
+		let deadline =
+			normalized.hevyDeadline ??
+			operationStartedAt + operationTimeoutMs * (maxGetRetries + 1);
+		const operationDeadline =
+			normalized.hevyDeadline ?? deadline + operationTimeoutMs;
+		let executionSignal = createExecutionSignal({
 			signal: normalized.signal,
 			deadline,
 		});
 		let retryCount = 0;
+		let deadlineRetryActive = false;
 
 		try {
 			while (true) {
-				const remaining = remainingDeadlineMs(deadline);
+				const attemptDeadline = Math.min(
+					deadline,
+					Date.now() + operationTimeoutMs,
+				);
+				const remaining = remainingDeadlineMs(attemptDeadline);
 				if (executionSignal.signal.aborted || remaining <= 0) {
 					const deadlineExceeded = remaining <= 0;
 					const error = createExecutionError({
@@ -974,6 +1088,7 @@ function createNativeClient(
 						phase: "before-dispatch",
 						deadlineExceeded,
 						canceled: !deadlineExceeded,
+						callerCanceled: !deadlineExceeded && executionSignal.signal.aborted,
 					});
 					emitRequestObservation(options.onRequestComplete, {
 						method,
@@ -1007,7 +1122,7 @@ function createNativeClient(
 					method,
 					endpoint,
 					safety,
-					deadline,
+					attemptDeadline,
 					executionSignal: executionSignal.signal,
 					startedAt,
 					retryCount,
@@ -1027,14 +1142,34 @@ function createNativeClient(
 						responseConfirmed,
 						executionSignal,
 						deadline,
+						attemptDeadline,
 						retryCount,
 						maxGetRetries,
+						deadlineRetryActive,
 						startedAt,
 						observationScope,
 						clientOptions: options,
 					});
 					if (!transition.retry) throw transition.error;
 					retryCount = transition.retryCount;
+					if (transition.error.code === HEVY_DEADLINE_EXCEEDED_ERROR_CODE) {
+						// Skip the deadline retry when the caller supplied an
+						// explicit deadline — it is authoritative and no retry
+						// may extend beyond it. In that case operationDeadline
+						// equals deadline, leaving no fresh attempt budget.
+						if (operationDeadline <= deadline) throw transition.error;
+						executionSignal.cleanup();
+						deadline = Math.min(
+							Date.now() + operationTimeoutMs,
+							operationDeadline,
+						);
+						executionSignal = createExecutionSignal({
+							signal: normalized.signal,
+							deadline,
+						});
+						deadlineRetryActive = true;
+						continue;
+					}
 					const delayMs = transition.delayMs ?? 0;
 					const remaining = remainingDeadlineMs(deadline);
 					try {
@@ -1056,6 +1191,8 @@ function createNativeClient(
 							phase: "backoff",
 							deadlineExceeded: waitDeadlineExceeded,
 							canceled: !waitDeadlineExceeded,
+							callerCanceled:
+								!waitDeadlineExceeded && executionSignal.signal.aborted,
 							cause: waitError,
 						});
 						emitRequestObservation(options.onRequestComplete, {
@@ -1154,11 +1291,19 @@ export function createClient(
 				headers,
 				requestOptions(options, client),
 			),
-		createRoutine: (
+		createRoutine: async (
 			data: PostV1RoutinesMutationRequest,
 			options?: HevyRequestOptions,
-		): ReturnType<typeof api.postV1Routines> =>
-			api.postV1Routines(data, headers, requestOptions(options, client)),
+		): Promise<Routine | undefined> => {
+			const response: PostV1Routines201 = await api.postV1Routines(
+				data,
+				headers,
+				requestOptions(options, client),
+			);
+			return Object.keys(response).length === 0
+				? undefined
+				: (response as Routine);
+		},
 		updateRoutine: (
 			routineId: string,
 			data: PutV1RoutinesRoutineidMutationRequest,

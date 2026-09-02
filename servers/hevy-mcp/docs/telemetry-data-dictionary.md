@@ -26,6 +26,11 @@ final defense-in-depth scrubber.
 | HTTP status                    | Numeric status code                                                                          | API diagnostics and metrics                   |
 | Error expectedness             | Boolean; expected failures are not sent to Sentry                                            | Failure spans                                 |
 | Correlation IDs                | OTel trace/span IDs, Sentry event ID, and opaque per-failure ID; never a user identity       | Failure events and traces                     |
+| `user.hash`                    | Ten-character lowercase HMAC pseudonym; never the raw Hevy API key                           | Node and hosted Worker MCP activity spans     |
+| `cloudflare.colo`              | Three-letter Cloudflare edge colo; a regional proxy, not exact user geography                | Hosted Worker MCP activity spans              |
+| `geo.locality.name`            | Bounded approximate Cloudflare IP-geolocation city                                           | Hosted Worker MCP activity spans              |
+| `geo.locality.region`          | Bounded approximate Cloudflare IP-geolocation region                                         | Hosted Worker MCP activity spans              |
+| `geo.country.code`             | Two-letter approximate Cloudflare IP-geolocation country code                                | Hosted Worker MCP activity spans              |
 
 API error categories and codes are emitted only after
 `createSafeErrorDiagnostic` normalization. Categories are the finite
@@ -59,8 +64,16 @@ The stdio initialize message may provide client name, client version, and MCP
 protocol version. Each value is trimmed, restricted to the safe token
 character set `[A-Za-z0-9._+:/@-]`, and limited to 64 characters; malformed or
 missing values become `unknown`. The transport is always `stdio` for this
-path. Metrics never contain a session ID, request ID, progress token, prompt,
-argument, result, or API-key-derived identity.
+path. Emitted metrics never contain a session ID, request ID, progress token,
+prompt, argument, result, or API-key-derived identity. TraceQL-derived metrics
+may aggregate the approved attributes from hosted Worker activity spans. Node
+MCP activity spans carry `user.hash` when the authenticated Hevy API key is
+available. Hosted Worker MCP activity spans may carry `user.hash` for
+distinct-user analysis, `cloudflare.colo` for the edge point of presence, and
+bounded approximate Cloudflare IP-geolocation fields (`geo.locality.name`,
+`geo.locality.region`, and `geo.country.code`) when Cloudflare supplies them.
+The hash is pseudonymous; the colo is an edge point of presence; and the
+geography fields are approximate request location, not verified residence.
 The server version is supplied by the service resource (`service.version`)
 and server lifecycle spans. Cloudflare-native telemetry is normalized at the
 collector from the deployment tag in `faas.version` only when
@@ -88,6 +101,8 @@ Never send or inspect for telemetry:
 - exact dates or timestamps from tool arguments or returned records;
 - body measurements, weights, reps, distances, durations, or other measurement
   values;
+- raw client IP addresses, exact location data, latitude, longitude, or postal
+  codes;
 - arbitrary client metadata or unnormalized endpoint paths.
 
 ## Regression guard
