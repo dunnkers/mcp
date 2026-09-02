@@ -30,9 +30,12 @@ up. The deploy job runs under a `bark-worker-production` environment; add
 environment-scoped overrides there only if you want this Worker to deploy
 with different credentials than the others.
 
-Before the first deploy, a human needs to create the D1 database and wire
-its id into `servers/bark-worker/wrangler.jsonc` (this can't be scripted
-from inside a sandboxed agent session):
+The `database-bark` D1 database has already been created and its id wired
+into `servers/bark-worker/wrangler.jsonc`. `npm run deploy` runs `wrangler
+d1 migrations apply database --remote` as a `predeploy` step, so the
+schema is created automatically on first deploy.
+
+To recreate this from scratch (e.g. a different Cloudflare account):
 
 ```bash
 cd servers/bark-worker
@@ -40,10 +43,7 @@ npx wrangler d1 create database-bark
 ```
 
 Copy the printed `database_id` into the `d1_databases[0].database_id`
-field in `wrangler.jsonc` (currently `<unique-ID-for-your-database>`) and
-commit it. `npm run deploy` runs `wrangler d1 migrations apply
-database --remote` as a `predeploy` step, so the schema is created
-automatically on first deploy once the database is wired up.
+field in `wrangler.jsonc` and commit it.
 
 ## Connecting from Claude
 
