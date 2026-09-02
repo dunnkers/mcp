@@ -1,0 +1,60 @@
+{
+  "name": "@andrijdavid/vinted-mcp",
+  "version": "0.1.2",
+  "description": "MCP Server for Vinted marketplace — search items, compare prices, analyze sellers across 19 countries.",
+  "mcpName": "io.github.andrijdavid/vinted-mcp",
+  "main": "dist/bundle.js",
+  "bin": {
+    "vinted-mcp": "dist/bundle.js",
+    "vinted-mcp-server": "dist/bundle.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+      "bundle": "npx --yes esbuild src/bin/cli.ts --bundle --platform=node --target=node22 --outfile=dist/bundle.js --format=cjs --external:@modelcontextprotocol/sdk --external:playwright --external:playwright-core --external:playwright-extra --external:puppeteer-extra-plugin-stealth",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true }); require('fs').rmSync('dist-ts', { recursive: true, force: true });\"",
+    "start": "node dist/bundle.js",
+    "test": "node --test tests/*.test.cjs",
+    "publish:canary:local": "bash scripts/publish-canary-local.sh"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "keywords": [
+    "vinted",
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "cursor",
+    "ai",
+    "scraper",
+    "marketplace",
+    "fashion",
+    "price-comparison",
+    "second-hand",
+    "mcp-server",
+    "ai-tools",
+    "shopping-assistant"
+  ],
+  "license": "AGPL-3.0-or-later",
+  "author": "andrijdavid",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andrijdavid/vinted-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/andrijdavid/vinted-mcp/issues"
+  },
+  "homepage": "https://github.com/andrijdavid/vinted-mcp#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "files": [
+    "dist/bundle.js",
+    "README.md",
+    "LICENSE.md",
+    ".env.example"
+  ]
+}
