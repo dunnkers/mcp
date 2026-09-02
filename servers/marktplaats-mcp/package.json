@@ -1,0 +1,23 @@
+{
+	"name": "marktplaats-mcp",
+	"version": "0.1.0",
+	"private": true,
+	"description": "MCP server for searching and browsing Marktplaats.nl listings, deployed as a Cloudflare Worker.",
+	"type": "module",
+	"scripts": {
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy",
+		"test": "vitest run",
+		"check:types": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@modelcontextprotocol/sdk": "^1.30.0",
+		"zod": "^4.5.4"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^5.20260902.1",
+		"typescript": "^7.0.2",
+		"vitest": "^4.1.11",
+		"wrangler": "^4.128.0"
+	}
+}
