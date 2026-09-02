@@ -1021,7 +1021,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		authorizeUrl.searchParams.set("code_challenge_method", "S256");
 		authorizeUrl.searchParams.set("state", "claude-state");
 		authorizeUrl.searchParams.set("scope", "mcp");
-		authorizeUrl.searchParams.set("resource", "https://worker.example/mcp");
+		authorizeUrl.searchParams.set("resource", "https://worker.example");
 
 		const result = await handler(
 			new Request(authorizeUrl),
