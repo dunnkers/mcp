@@ -24,6 +24,15 @@ type ToolDefinitionBase<
 	): Promise<TResult>;
 };
 
+type RegisteredToolConfig = {
+	description: string;
+	inputSchema: ReturnType<typeof compactJsonSchema>;
+	annotations: ToolAnnotations;
+	outputSchema?: ReturnType<typeof compactJsonSchema>;
+};
+
+export type ToolRegistrar = Pick<McpServer, "registerTool">;
+
 export type ToolDefinition<
 	TSchema extends Record<string, z.ZodTypeAny>,
 	TResult,
@@ -35,14 +44,53 @@ export type ToolDefinition<
 		  }
 		| {
 				readonly kind: "write";
-				readonly outputSchema?: never;
+				readonly outputSchema?: z.ZodRawShape;
 		  }
 	);
 
+type AnyToolDefinition = ToolDefinition<Record<string, z.ZodTypeAny>, unknown>;
+
+/**
+ * One-time-per-isolate registration metadata for each tool definition.
+ *
+ * Building a tool's compact JSON Schema (and the SDK's eager wire conversion
+ * of the `compactJsonSchema`-wrapped schema on registration) is the dominant
+ * CPU cost when constructing an MCP server. Tool definitions are module-level
+ * constants, so this metadata can be computed once and shared by every server
+ * a single isolate builds. The SDK's `registerTool` reads the schema strictly
+ * through the Standard Schema interface and never mutates it, so sharing the
+ * memoized config across concurrent servers is safe.
+ *
+ * Keep the memo lazy: CLI and test processes that never build a Hevy server
+ * pay nothing. Isolate-based edge runtimes that want the one-time conversion
+ * moved into module-scope (outside request CPU) call `preloadHevyToolSchemas`.
+ */
+const registeredToolConfigCache = new WeakMap<
+	AnyToolDefinition,
+	RegisteredToolConfig
+>();
+
+export function getRegisteredToolConfig(
+	definition: AnyToolDefinition,
+): RegisteredToolConfig {
+	const cached = registeredToolConfigCache.get(definition);
+	if (cached) return cached;
+	const config: RegisteredToolConfig = {
+		description: definition.description,
+		inputSchema: compactJsonSchema(z.strictObject(definition.inputSchema)),
+		annotations: definition.annotations,
+	};
+	if (definition.outputSchema) {
+		config.outputSchema = compactJsonSchema(z.object(definition.outputSchema));
+	}
+	registeredToolConfigCache.set(definition, config);
+	return config;
+}
+
 export function registerToolDefinition(
-	server: McpServer,
+	server: ToolRegistrar,
 	runtime: ToolRuntime,
-	definition: ToolDefinition<Record<string, z.ZodTypeAny>, unknown>,
+	definition: AnyToolDefinition,
 ): void {
 	const directHandler = createTypedToolHandler(
 		definition.inputSchema,
@@ -60,23 +108,11 @@ export function registerToolDefinition(
 		kind: definition.kind,
 		operation: definition.operation,
 	});
-	const callback = handler;
 
-	const inputSchema = compactJsonSchema(z.strictObject(definition.inputSchema));
-	const config = {
-		description: definition.description,
-		inputSchema,
-		annotations: definition.annotations,
-		...(definition.kind === "read"
-			? {
-					outputSchema: compactJsonSchema(z.object(definition.outputSchema)),
-				}
-			: {}),
-	};
-
+	const config = getRegisteredToolConfig(definition);
 	server.registerTool(definition.name, config, (args, context) =>
-		callback(
-			args,
+		handler(
+			z.strictObject(definition.inputSchema).parse(args),
 			context
 				? {
 						signal: context.mcpReq.signal,

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SpanStatusCode } from "@opentelemetry/api";
+import type { Context, Span } from "@opentelemetry/api";
 import {
 	HevyHttpError,
 	type HevyRequestObservation,
@@ -20,12 +21,10 @@ const testDoubles = vi.hoisted(() => ({
 	apiCallsAdd: vi.fn(),
 	apiDurationRecord: vi.fn(),
 	contextActive: vi.fn(() => "active-context"),
-	contextWith: vi.fn((_context: unknown, operation: () => Promise<unknown>) =>
+	contextWith: vi.fn((_context: Context, operation: () => Promise<unknown>) =>
 		operation(),
 	),
-	traceSetSpan: vi.fn(
-		(_context: unknown, _span: unknown) => "api-span-context",
-	),
+	traceSetSpan: vi.fn((_context: Context, _span: Span) => "api-span-context"),
 }));
 vi.mock("./telemetry.js", () => ({
 	tracer: { startSpan: testDoubles.startSpan },
@@ -117,7 +116,7 @@ describe("createNodeHevyClientOptions", () => {
 		);
 	});
 
-	it("normalizes dynamic endpoint labels without hiding trace diagnostics", () => {
+	it("normalizes dynamic endpoint labels without exposing IDs", () => {
 		const options = createNodeHevyClientOptions();
 
 		observe(options, {
@@ -131,7 +130,7 @@ describe("createNodeHevyClientOptions", () => {
 
 		expect(testDoubles.startSpan).toHaveBeenCalledWith("hevy.api.GET", {
 			attributes: expect.objectContaining({
-				"hevy.api.endpoint": "/v1/workouts/workout-secret",
+				"hevy.api.endpoint": "/v1/workouts/:workoutId",
 			}),
 		});
 		expect(testDoubles.apiCallsAdd).toHaveBeenCalledWith(
@@ -229,6 +228,69 @@ describe("createNodeHevyClientOptions", () => {
 		expect(JSON.stringify(testDoubles.span.addEvent.mock.calls)).not.toContain(
 			secret,
 		);
+	});
+
+	it("records response diagnostics on failure events but not metric labels", () => {
+		const options = createNodeHevyClientOptions();
+		observe(options, {
+			method: "PUT",
+			endpoint: "/v1/workouts/:workoutId",
+			status: 500,
+			durationMs: 25,
+			retryCount: 3,
+			outcome: "terminal_failure",
+			error: {
+				status: 500,
+				category: "HevyHttpError",
+				response_error: "Invalid email [EMAIL_REDACTED]",
+			},
+		});
+
+		expect(testDoubles.span.addEvent).toHaveBeenCalledWith(
+			"hevy.api.failure",
+			expect.objectContaining({
+				"hevy.api.response_error": "Invalid email [EMAIL_REDACTED]",
+			}),
+		);
+		const metricText = JSON.stringify([
+			testDoubles.apiCallsAdd.mock.calls,
+			testDoubles.apiDurationRecord.mock.calls,
+		]);
+		expect(metricText).not.toContain("response_error");
+	});
+
+	it("honors the diagnostics opt-out for response details", () => {
+		const originalSetting = process.env.HEVY_MCP_TELEMETRY_DIAGNOSTICS;
+		process.env.HEVY_MCP_TELEMETRY_DIAGNOSTICS = "0";
+		try {
+			const options = createNodeHevyClientOptions();
+			observe(options, {
+				method: "PUT",
+				endpoint: "/v1/workouts/:workoutId",
+				status: 500,
+				durationMs: 25,
+				retryCount: 3,
+				outcome: "terminal_failure",
+				error: {
+					status: 500,
+					category: "HevyHttpError",
+					response_error: "sensitive upstream detail",
+				},
+			});
+
+			expect(testDoubles.span.addEvent).toHaveBeenCalledWith(
+				"hevy.api.failure",
+				{
+					"error.category": "HevyHttpError",
+				},
+			);
+		} finally {
+			if (originalSetting === undefined) {
+				delete process.env.HEVY_MCP_TELEMETRY_DIAGNOSTICS;
+			} else {
+				process.env.HEVY_MCP_TELEMETRY_DIAGNOSTICS = originalSetting;
+			}
+		}
 	});
 
 	it("records allowlisted error codes and normalizes an absent status", () => {

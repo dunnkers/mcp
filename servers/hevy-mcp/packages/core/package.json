@@ -1,6 +1,6 @@
 {
 	"name": "@hevy-mcp/core",
-	"version": "0.1.1",
+	"version": "0.2.8",
 	"private": true,
 	"type": "module",
 	"exports": {
@@ -18,9 +18,10 @@
 		"check:types": "tsc --noEmit -p tsconfig.json"
 	},
 	"dependencies": {
-		"@hevy-mcp/hevy-client": "*",
-		"@hevy-mcp/operations": "*",
+		"@hevy-mcp/hevy-client": "workspace:*",
+		"@hevy-mcp/operations": "workspace:*",
 		"@modelcontextprotocol/server": "^2.0.0",
+		"effect": "^4.0.0-rc.112",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
