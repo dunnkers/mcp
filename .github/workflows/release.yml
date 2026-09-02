@@ -38,34 +38,33 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 12.0.0
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: ".nvmrc"
-          cache: "npm"
-      - run: npm ci
-      - run: npx nx run repository:build
+          cache: "pnpm"
+      - name: Set up mise
+        uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
+      - run: pnpm install --frozen-lockfile
+      - name: Build release package
+        run: npx nx run repository:build
         env:
           HEVY_MCP_RELEASE: "true"
           SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
           SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           OTEL_COLLECTOR_TOKEN: ${{ secrets.OTEL_COLLECTOR_TOKEN }}
-      - name: Run unit tests
-        run: npx nx run repository:test:release-unit
-      - name: Run Worker tests
-        run: npx nx run repository:test:worker
-      - name: Run CLI tests
-        run: npx nx run repository:test:cli
-      - name: Verify published packages
-        run: npx nx run repository:test:pack:cli
-      - name: Check published package metadata
-        run: npx nx run repository:check:publint
-        env:
-          HEVY_MCP_RELEASE: "true"
-          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          OTEL_COLLECTOR_TOKEN: ${{ secrets.OTEL_COLLECTOR_TOKEN }}
+      - name: Prepare shared package candidates
+        run: |
+          npx nx run @chrisdoc/hevy-cli:build
+          npx nx run repository:check:server-manifest
+          npx nx run repository:pack:artifacts --excludeTaskDependencies
+      - name: Validate release candidates
+        run: >-
+          npx nx run-many --projects=repository --targets=test:release-unit,test:worker,test:pack,test:cli,test:pack:cli,check:publint --parallel=3 --outputStyle=stream --excludeTaskDependencies
       - name: Run integration tests
         run: npx nx run repository:test:integration
         env:
@@ -82,7 +81,6 @@ jobs:
           HEVY_MCP_DIAGNOSTICS_PATH: test-results/release-source.json
 
       - name: Smoke test live local Worker HTTP path
-        continue-on-error: true
         run: npx nx run repository:test:worker-http:live
         env:
           HEVY_API_KEY: ${{ secrets.HEVY_API_KEY }}
@@ -90,7 +88,7 @@ jobs:
 
       - name: Create Release PR or Publish
         id: changesets
-        uses: changesets/action@2d9f7af6402422be60d377f151c7618011bba45a # v2.0.0-next.4
+        uses: changesets/action@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.1.1
         with:
           version-script: npx nx run repository:version:changesets
           publish-script: npx nx run repository:release
@@ -135,7 +133,7 @@ jobs:
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -188,14 +186,18 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
 
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 12.0.0
+
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
-          cache: npm
+          cache: pnpm
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Deploy published version
         env:
@@ -256,15 +258,22 @@ jobs:
             exit 1
           fi
 
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 12.0.0
+
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: ".nvmrc"
-          cache: "npm"
+          cache: "pnpm"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Set up mise
+        uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
+
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Set transient preview version
         env:

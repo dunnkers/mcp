@@ -1,9 +1,19 @@
 import {
+	diagnosticEndpointIdentity,
 	HEVY_DEADLINE_EXCEEDED_ERROR_CODE,
 	HEVY_REQUEST_ABORTED_ERROR_CODE,
 	HEVY_RETRY_EXHAUSTED_ERROR_CODE,
 	isHevyHttpError,
 } from "@hevy-mcp/hevy-client";
+import {
+	isBoolean,
+	isFiniteNumber,
+	isFunction,
+	isObject,
+	isString,
+} from "./type-predicates.js";
+import type { RuntimeValue } from "./type-predicates.js";
+import { SafeUserError } from "./safe-user-error.js";
 import type {
 	HevyCommitState,
 	HevyExecutionOutcome,
@@ -20,6 +30,9 @@ export enum ErrorType {
 	NETWORK_ERROR = "NETWORK_ERROR",
 	UNKNOWN_ERROR = "UNKNOWN_ERROR",
 }
+
+type HeaderValue = string | number | string[] | undefined;
+type HeaderMap = { [key: string]: HeaderValue };
 
 export type SafeErrorCategory =
 	| "AggregateError"
@@ -61,6 +74,24 @@ type SafeSourceId =
 	| "server"
 	| "worker";
 
+/** Categories createSafeErrorDiagnostic may emit; part of the module's interface. */
+export const SAFE_ERROR_CATEGORIES: ReadonlySet<SafeErrorCategory> =
+	Object.freeze(
+		new Set<SafeErrorCategory>([
+			"AggregateError",
+			"DOMException",
+			"Error",
+			"EvalError",
+			"HevyHttpError",
+			"RangeError",
+			"ReferenceError",
+			"SyntaxError",
+			"TypeError",
+			"URIError",
+			"UnknownError",
+		]),
+	);
+
 type RetryAwareError = {
 	hevyRetryCount?: number;
 	hevyRetryExhausted?: boolean;
@@ -84,7 +115,7 @@ type AbortTimeoutErrorMetadata =
 
 /** Map raw cancellation errors to their bounded execution metadata. */
 function getAbortTimeoutErrorMetadata(
-	error: unknown,
+	error: RuntimeValue,
 ): AbortTimeoutErrorMetadata | undefined {
 	try {
 		if (!(error instanceof Error)) return undefined;
@@ -96,49 +127,29 @@ function getAbortTimeoutErrorMetadata(
 	}
 }
 
-const SAFE_ERROR_CODES = new Set([
-	"EAI_AGAIN",
-	"ECONNABORTED",
-	"ECONNREFUSED",
-	"ECONNRESET",
-	"ENETUNREACH",
-	"ENOTFOUND",
-	"ERR_NETWORK",
-	"ERR_SOCKET_TIMEOUT",
-	"ETIMEDOUT",
-	"HEVY_INVALID_ENDPOINT",
-	HEVY_REQUEST_ABORTED_ERROR_CODE,
-	HEVY_RETRY_EXHAUSTED_ERROR_CODE,
-	HEVY_DEADLINE_EXCEEDED_ERROR_CODE,
-]);
+/** Bounded error codes diagnostics may carry; adapters validate against this. */
+export const SAFE_ERROR_CODES: ReadonlySet<string> = Object.freeze(
+	new Set([
+		"EAI_AGAIN",
+		"ECONNABORTED",
+		"ECONNREFUSED",
+		"ECONNRESET",
+		"ENETUNREACH",
+		"ENOTFOUND",
+		"ERR_NETWORK",
+		"ERR_SOCKET_TIMEOUT",
+		"ETIMEDOUT",
+		"HEVY_INVALID_ENDPOINT",
+		HEVY_REQUEST_ABORTED_ERROR_CODE,
+		HEVY_RETRY_EXHAUSTED_ERROR_CODE,
+		HEVY_DEADLINE_EXCEEDED_ERROR_CODE,
+	]),
+);
 
-const SAFE_HTTP_METHODS = new Set([
-	"DELETE",
-	"GET",
-	"HEAD",
-	"OPTIONS",
-	"PATCH",
-	"POST",
-	"PUT",
-]);
-
-const SAFE_ENDPOINTS = new Set([
-	"unknown",
-	"/v1/body_measurements",
-	"/v1/body_measurements/:date",
-	"/v1/exercise_history/:exerciseTemplateId",
-	"/v1/exercise_templates",
-	"/v1/exercise_templates/:exerciseTemplateId",
-	"/v1/routine_folders",
-	"/v1/routine_folders/:folderId",
-	"/v1/routines",
-	"/v1/routines/:routineId",
-	"/v1/user/info",
-	"/v1/workouts",
-	"/v1/workouts/:workoutId",
-	"/v1/workouts/count",
-	"/v1/workouts/events",
-]);
+/** Bounded HTTP methods diagnostics may carry. */
+export const SAFE_HTTP_METHODS: ReadonlySet<string> = Object.freeze(
+	new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]),
+);
 
 const SAFE_SOURCE_SUFFIXES: ReadonlyArray<readonly [string, SafeSourceId]> = [
 	["/packages/core/src/utils/error-handler.ts", "error-handler"],
@@ -149,15 +160,20 @@ const SAFE_SOURCE_SUFFIXES: ReadonlyArray<readonly [string, SafeSourceId]> = [
 ];
 
 const PROJECT_PATH_MARKER = "/hevy-mcp/";
+
+/** Stack-frame sources diagnostics may name; adapters validate against this. */
+export const SAFE_STACK_SOURCES: ReadonlySet<SafeSourceId> = Object.freeze(
+	new Set(SAFE_SOURCE_SUFFIXES.map(([, id]) => id)),
+);
 const MAX_STACK_POSITION = 1_000_000;
 
-function normalizeHeaderValue(value: unknown): string | undefined {
-	if (typeof value === "string") {
+function normalizeHeaderValue(value: RuntimeValue): string | undefined {
+	if (isString(value)) {
 		const trimmed = value.trim();
 		return trimmed.length > 0 ? trimmed : undefined;
 	}
 
-	if (typeof value === "number" && Number.isFinite(value)) {
+	if (isFiniteNumber(value)) {
 		return String(value);
 	}
 
@@ -168,21 +184,21 @@ function normalizeHeaderValue(value: unknown): string | undefined {
 	return undefined;
 }
 
-function getHeaderValue(headers: unknown, key: string): string | undefined {
+function getHeaderValue(
+	headers: RuntimeValue,
+	key: string,
+): string | undefined {
 	try {
-		if (!headers || typeof headers !== "object") return undefined;
+		if (!isObject(headers)) return undefined;
 
-		if (
-			"get" in headers &&
-			typeof (headers as { get?: unknown }).get === "function"
-		) {
+		if ("get" in headers && isFunction((headers as { get?: unknown }).get)) {
 			const value = (headers as { get: (headerName: string) => unknown }).get(
 				key,
 			);
 			return normalizeHeaderValue(value);
 		}
 
-		const headerRecord = headers as Record<string, unknown>;
+		const headerRecord = headers as HeaderMap;
 		return normalizeHeaderValue(
 			headerRecord[key] ??
 				headerRecord[key.toLowerCase()] ??
@@ -194,7 +210,7 @@ function getHeaderValue(headers: unknown, key: string): string | undefined {
 }
 
 /** Extract a valid HTTP status without retaining untrusted error metadata. */
-export function extractErrorStatus(error: unknown): number | undefined {
+export function extractErrorStatus(error: RuntimeValue): number | undefined {
 	try {
 		if (!isHevyHttpError(error)) return undefined;
 		return error.status !== undefined &&
@@ -209,11 +225,11 @@ export function extractErrorStatus(error: unknown): number | undefined {
 }
 
 /** Return whether the client exhausted its bounded transient retry policy. */
-export function isRetryExhausted(error: unknown): boolean {
+export function isRetryExhausted(error: RuntimeValue): boolean {
 	try {
 		return (
 			!!error &&
-			typeof error === "object" &&
+			isObject(error) &&
 			(error as RetryAwareError).hevyRetryExhausted === true
 		);
 	} catch {
@@ -223,7 +239,7 @@ export function isRetryExhausted(error: unknown): boolean {
 
 /** Interpret a Retry-After header as seconds from the supplied current time. */
 export function getRetryAfterSeconds(
-	error: unknown,
+	error: RuntimeValue,
 	now = Date.now(),
 ): number | undefined {
 	try {
@@ -243,16 +259,34 @@ export function getRetryAfterSeconds(
 }
 
 /** Map bounded Hevy HTTP statuses to stable user-facing messages. */
-export function getStatusErrorMessage(status?: number): string | null {
+export function getStatusErrorMessage(
+	status?: number,
+	method?: string,
+	endpoint?: string,
+): string | null {
+	if (
+		status === 404 &&
+		method?.toUpperCase() === "PUT" &&
+		endpoint === "/v1/routines/:routineId"
+	) {
+		return "The requested routine was not found in Hevy. It may have been deleted or the routine ID is incorrect.";
+	}
+	if (status === 400 || status === 422) {
+		return "The request failed Hevy validation. Check the field values and try again.";
+	}
 	if (status === 401 || status === 403) {
 		return "The Hevy API key is invalid or has expired. Check HEVY_API_KEY.";
 	}
 	if (status === 404) return "The requested resource was not found in Hevy.";
-	if (status === 409) {
-		return "A conflict occurred (e.g., a body measurement already exists for this date). Use the update tool instead.";
+	if (
+		status === 409 &&
+		method?.toUpperCase() === "POST" &&
+		endpoint === "/v1/body_measurements"
+	) {
+		return "A body measurement already exists for this date. Use the update-body-measurement tool to modify it.";
 	}
-	if (status === 422) {
-		return "The request failed Hevy validation. Check the field values and try again.";
+	if (status === 409) {
+		return "A conflict occurred because the resource already exists or conflicts with the current server state. Check whether it already exists and use the update tool when appropriate.";
 	}
 	if (status === 429) return "Rate limited by Hevy. Please wait and retry.";
 	if (status !== undefined && status >= 500 && status <= 599) {
@@ -267,7 +301,7 @@ function formatSecondsLabel(seconds: number): string {
 	return `${roundedSeconds} second${suffix}`;
 }
 
-function getRateLimitMessage(error: unknown): string {
+function getRateLimitMessage(error: RuntimeValue): string {
 	const seconds = getRetryAfterSeconds(error);
 	if (seconds !== undefined) {
 		return `Rate limited by Hevy (HTTP 429). Please wait about ${formatSecondsLabel(seconds)} before retrying.`;
@@ -275,28 +309,29 @@ function getRateLimitMessage(error: unknown): string {
 	return "Rate limited by Hevy (HTTP 429). Please wait and retry your request.";
 }
 
-function getRetryExhaustedMessage(error: unknown): string {
+function getRetryExhaustedMessage(error: RuntimeValue): string {
 	let retryCount: unknown;
 	try {
-		retryCount =
-			typeof error === "object" && error !== null
-				? (error as RetryAwareError).hevyRetryCount
-				: undefined;
+		retryCount = isObject(error)
+			? (error as RetryAwareError).hevyRetryCount
+			: undefined;
 	} catch {
 		retryCount = undefined;
 	}
-	const attemptCount =
-		typeof retryCount === "number" && Number.isFinite(retryCount)
-			? retryCount + 1
-			: undefined;
+	const attemptCount = isFiniteNumber(retryCount) ? retryCount + 1 : undefined;
 	if (attemptCount) {
 		return `Unable to complete the request after ${attemptCount} attempts to the Hevy API due to transient failures. Please try again shortly.`;
 	}
 	return "Unable to complete the request after multiple attempts to the Hevy API due to transient failures. Please try again shortly.";
 }
 
+const MAX_SAFE_USER_ERROR_LENGTH = 512;
+
 /** Classify an error using bounded status, names, and supplied text. */
-export function determineErrorType(error: unknown, message: string): ErrorType {
+export function determineErrorType(
+	error: RuntimeValue,
+	message: string,
+): ErrorType {
 	if (isRetryExhausted(error)) return ErrorType.NETWORK_ERROR;
 	if (extractErrorStatus(error) === 429) return ErrorType.RATE_LIMIT;
 
@@ -347,7 +382,7 @@ export function determineErrorType(error: unknown, message: string): ErrorType {
 	return ErrorType.UNKNOWN_ERROR;
 }
 
-function classifyError(error: unknown): SafeErrorCategory {
+function classifyError(error: RuntimeValue): SafeErrorCategory {
 	if (isHevyHttpError(error)) return "HevyHttpError";
 	if (error instanceof TypeError) return "TypeError";
 	if (error instanceof RangeError) return "RangeError";
@@ -356,38 +391,36 @@ function classifyError(error: unknown): SafeErrorCategory {
 	if (error instanceof URIError) return "URIError";
 	if (error instanceof EvalError) return "EvalError";
 	if (error instanceof AggregateError) return "AggregateError";
-	if (typeof DOMException !== "undefined" && error instanceof DOMException) {
+	if (error instanceof DOMException) {
 		return "DOMException";
 	}
 	if (error instanceof Error) return "Error";
 	return "UnknownError";
 }
 
-function getSafeCode(error: unknown): string | undefined {
+function getSafeCode(error: RuntimeValue): string | undefined {
 	const abortTimeout = getAbortTimeoutErrorMetadata(error);
 	if (abortTimeout) return abortTimeout.code;
-	if (!error || typeof error !== "object" || !("code" in error)) {
+	if (!isObject(error) || !("code" in error)) {
 		return undefined;
 	}
 	const code = error.code;
-	return typeof code === "string" && SAFE_ERROR_CODES.has(code)
-		? code
-		: undefined;
+	return isString(code) && SAFE_ERROR_CODES.has(code) ? code : undefined;
 }
 
-function getSafeMethod(error: unknown): string | undefined {
+function getSafeMethod(error: RuntimeValue): string | undefined {
 	if (!isHevyHttpError(error)) return undefined;
 	const method = error.method.toUpperCase();
 	return SAFE_HTTP_METHODS.has(method) ? method : undefined;
 }
 
-function getSafeEndpoint(error: unknown): string | undefined {
+function getSafeEndpoint(error: RuntimeValue): string | undefined {
 	if (!isHevyHttpError(error)) return undefined;
-	return SAFE_ENDPOINTS.has(error.endpoint) ? error.endpoint : undefined;
+	return diagnosticEndpointIdentity(error.endpoint);
 }
 
 function getExecutionFields(
-	error: unknown,
+	error: RuntimeValue,
 ): Pick<
 	SafeErrorDiagnostic,
 	"phase" | "operation_safety" | "commit_state" | "safe_to_retry" | "outcome"
@@ -403,21 +436,29 @@ function getExecutionFields(
 		}
 		return {};
 	}
-	return {
-		...(error.phase ? { phase: error.phase } : {}),
-		...(error.operation_safety
-			? { operation_safety: error.operation_safety }
-			: {}),
-		...(error.commit_state ? { commit_state: error.commit_state } : {}),
-		...(typeof error.safe_to_retry === "boolean"
-			? { safe_to_retry: error.safe_to_retry }
-			: {}),
-		...(error.outcome ? { outcome: error.outcome } : {}),
-	};
+	const fields: Partial<
+		Pick<
+			SafeErrorDiagnostic,
+			| "phase"
+			| "operation_safety"
+			| "commit_state"
+			| "safe_to_retry"
+			| "outcome"
+		>
+	> = {};
+	if (error.phase) fields.phase = error.phase;
+	if (error.operation_safety) fields.operation_safety = error.operation_safety;
+	if (error.commit_state) fields.commit_state = error.commit_state;
+	if (isBoolean(error.safe_to_retry))
+		fields.safe_to_retry = error.safe_to_retry;
+	if (error.outcome) fields.outcome = error.outcome;
+	return fields;
 }
 
-function parseSafeStackFrames(error: unknown): SafeStackFrame[] | undefined {
-	if (!(error instanceof Error) || typeof error.stack !== "string") {
+function parseSafeStackFrames(
+	error: RuntimeValue,
+): SafeStackFrame[] | undefined {
+	if (!(error instanceof Error) || !isString(error.stack)) {
 		return undefined;
 	}
 
@@ -461,7 +502,9 @@ function parseSafeStackFrames(error: unknown): SafeStackFrame[] | undefined {
 }
 
 /** Build bounded diagnostic metadata with no raw messages, payloads, or URLs. */
-export function createSafeErrorDiagnostic(error: unknown): SafeErrorDiagnostic {
+export function createSafeErrorDiagnostic(
+	error: RuntimeValue,
+): SafeErrorDiagnostic {
 	try {
 		const diagnostic: SafeErrorDiagnostic = { category: classifyError(error) };
 		const code = getSafeCode(error);
@@ -489,12 +532,16 @@ export interface ErrorPolicyResult {
 
 /** Resolve all bounded policy outputs used by MCP, telemetry, and reporting adapters. */
 export function resolveErrorPolicy(
-	error: unknown,
+	error: RuntimeValue,
 	defaultMessage: string,
 	notInitializedMessage?: string,
 ): ErrorPolicyResult {
 	const diagnostic = createSafeErrorDiagnostic(error);
-	const mappedMessage = getStatusErrorMessage(diagnostic.status);
+	const mappedMessage = getStatusErrorMessage(
+		diagnostic.status,
+		diagnostic.method,
+		diagnostic.endpoint,
+	);
 	let message =
 		mappedMessage ??
 		(diagnostic.status !== undefined
@@ -511,10 +558,27 @@ export function resolveErrorPolicy(
 	}
 	if (isNotInitialized) {
 		message = notInitializedMessage ?? defaultMessage;
+	} else if (
+		diagnostic.status === 400 &&
+		isHevyHttpError(error) &&
+		error.responseError
+	) {
+		message = `${message} Detail: ${error.responseError}`;
+	} else if (diagnostic.code === HEVY_REQUEST_ABORTED_ERROR_CODE) {
+		// This code is emitted only for caller cancellation. Keep its explicit
+		// client-facing message instead of falling back to the generic error text.
+		message = "The request was canceled by the client.";
 	} else if (isRetryExhausted(error)) {
 		message = getRetryExhaustedMessage(error);
 	} else if (diagnostic.status === 429) {
 		message = getRateLimitMessage(error);
+	} else if (
+		diagnostic.status === undefined &&
+		error instanceof SafeUserError &&
+		error.message &&
+		error.message !== notInitializedMessage
+	) {
+		message = error.message.slice(0, MAX_SAFE_USER_ERROR_LENGTH);
 	}
 	return { type: determineErrorType(error, message), message, diagnostic };
 }

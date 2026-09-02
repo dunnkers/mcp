@@ -13,6 +13,7 @@ import {
 	memoizeObservationScope,
 	type SafeToolArgumentKey,
 	type ToolObserver,
+	type ToolCompletionObservation,
 } from "../observation.js";
 import { bucketCount, getResultTelemetry } from "../utils/result-telemetry.js";
 import { resolveErrorPolicy } from "../utils/error-policy.js";
@@ -22,28 +23,21 @@ import {
 	type ToolExecutionContext,
 } from "../execution.js";
 import { DEFAULT_API_TIMEOUT_MS } from "@hevy-mcp/hevy-client";
+import { TELEMETRY_ARGUMENT_KEYS } from "../utils/telemetry-contract.js";
+import { isBoolean, isFiniteNumber } from "../utils/type-predicates.js";
 
-const STRUCTURAL_ARGUMENT_KEYS: Readonly<Record<string, true>> = {
-	page: true,
-	page_size: true,
-	since: true,
-	workout_id: true,
-	routine_id: true,
-	folder_id: true,
-	exercise_template_id: true,
-	date: true,
-	start_date: true,
-	end_date: true,
-	updated_since: true,
-	include_custom: true,
-	limit: true,
-	offset: true,
-	refresh: true,
-	query: true,
-	primary_muscle_group: true,
-};
+interface ArgumentKeySet {
+	readonly [key: string]: true;
+}
 
-const PRESENCE_ARGUMENT_KEYS: Readonly<Record<string, true>> = {
+const toKeySet = (keys: readonly string[]): Readonly<ArgumentKeySet> =>
+	Object.fromEntries(keys.map((key) => [key, true as const]));
+
+const STRUCTURAL_ARGUMENT_KEYS: Readonly<ArgumentKeySet> = toKeySet(
+	TELEMETRY_ARGUMENT_KEYS,
+);
+
+const PRESENCE_ARGUMENT_KEYS: Readonly<ArgumentKeySet> = {
 	since: true,
 	workout_id: true,
 	routine_id: true,
@@ -57,14 +51,14 @@ const PRESENCE_ARGUMENT_KEYS: Readonly<Record<string, true>> = {
 	primary_muscle_group: true,
 };
 
-const NUMERIC_ARGUMENT_KEYS: Readonly<Record<string, true>> = {
+const NUMERIC_ARGUMENT_KEYS: Readonly<ArgumentKeySet> = {
 	page: true,
 	page_size: true,
 	limit: true,
 	offset: true,
 };
 
-const BOOLEAN_ARGUMENT_KEYS: Readonly<Record<string, true>> = {
+const BOOLEAN_ARGUMENT_KEYS: Readonly<ArgumentKeySet> = {
 	include_custom: true,
 	refresh: true,
 };
@@ -73,11 +67,12 @@ const structuralArgumentKeys = Object.keys(
 	STRUCTURAL_ARGUMENT_KEYS,
 ) as SafeToolArgumentKey[];
 
-function createSafeInvocation(
+function createSafeInvocation<TArgs extends object>(
 	name: string,
-	args: Record<string, unknown>,
+	args: TArgs,
 	taxonomy: ToolTelemetryMetadata | undefined,
 ) {
+	const argumentValues = new Map<string, unknown>(Object.entries(args));
 	const argumentKeys = structuralArgumentKeys.filter((key) => key in args);
 	const argumentPresence: Record<string, true> = {};
 	const numericArgumentBuckets: Record<
@@ -87,7 +82,7 @@ function createSafeInvocation(
 	const booleanArguments: Record<string, boolean> = {};
 
 	for (const key of argumentKeys) {
-		const value = args[key];
+		const value = argumentValues.get(key);
 		if (
 			key in PRESENCE_ARGUMENT_KEYS &&
 			value !== null &&
@@ -95,10 +90,10 @@ function createSafeInvocation(
 		) {
 			argumentPresence[key] = true;
 		}
-		if (key in NUMERIC_ARGUMENT_KEYS && typeof value === "number") {
+		if (key in NUMERIC_ARGUMENT_KEYS && isFiniteNumber(value)) {
 			numericArgumentBuckets[key] = bucketCount(value);
 		}
-		if (key in BOOLEAN_ARGUMENT_KEYS && typeof value === "boolean") {
+		if (key in BOOLEAN_ARGUMENT_KEYS && isBoolean(value)) {
 			booleanArguments[key] = value;
 		}
 	}
@@ -114,11 +109,12 @@ function createSafeInvocation(
 	};
 }
 
-export type ToolHandler<
-	TParams extends Record<string, unknown> = Record<string, unknown>,
-> = (args: TParams, context?: ToolExecutionContext) => Promise<McpToolResponse>;
+export type ToolHandler<TParams extends object = object> = (
+	args: TParams,
+	context?: ToolExecutionContext,
+) => Promise<McpToolResponse>;
 
-export type ToolHandlerFactory = <TParams extends Record<string, unknown>>(
+export type ToolHandlerFactory = <TParams extends object>(
 	fn: ToolHandler<TParams>,
 	context: string,
 	metadata?: ToolTelemetryMetadata,
@@ -154,11 +150,11 @@ export interface CreateToolRuntimeOptions {
 }
 
 export const defaultHandlerFactory: ToolHandlerFactory = <
-	TParams extends Record<string, unknown>,
+	TParams extends object,
 >(
 	fn: ToolHandler<TParams>,
 	context: string,
-) => withErrorHandling(fn, context);
+) => withErrorHandling(fn, context) as ToolHandler;
 
 export function createToolRuntime({
 	client,
@@ -177,9 +173,7 @@ export function createToolRuntime({
 	const resolvedOperations =
 		operations ?? (rawClient ? createOperations(rawClient) : null);
 	const effectiveExecutionDeadline = executionDeadline ?? execution?.deadline;
-	const createObservedHandler: ToolHandlerFactory = <
-		TParams extends Record<string, unknown>,
-	>(
+	const createObservedHandler: ToolHandlerFactory = <TParams extends object>(
 		fn: ToolHandler<TParams>,
 		context: string,
 		metadata?: ToolTelemetryMetadata,
@@ -214,19 +208,18 @@ export function createToolRuntime({
 						runPromise = invokeHandler();
 					}
 					const result = await runPromise.catch(invokeHandler);
-					void scope?.finish({
+					const telemetry = {
 						outcome: result.isError ? "returned_error" : "success",
 						durationMs: Date.now() - startedAt,
-						...(result.errorOutcome
-							? { errorOutcome: result.errorOutcome }
-							: {}),
+						errorOutcome: result.errorOutcome,
 						result: {
 							isError: Boolean(result.isError),
 							hasStructuredContent: result.structuredContent !== undefined,
 							contentCountBucket: bucketCount(result.content.length),
 							summary: getResultTelemetry(result),
 						},
-					});
+					} satisfies ToolCompletionObservation;
+					void scope?.finish(telemetry);
 					return result;
 				} catch (error) {
 					const policy = resolveErrorPolicy(error, "");
@@ -272,14 +265,23 @@ export function createToolRuntime({
 				logger,
 				createHandler,
 				observer,
-				execution: {
-					...(nextExecution ?? {}),
-					signal: mergeAbortSignals(lifecycleSignal, nextExecution?.signal),
-					deadline:
+				execution: (() => {
+					const nested: {
+						-readonly [
+							K in keyof ToolExecutionContext
+						]?: ToolExecutionContext[K];
+					} = {};
+					if (nextExecution) Object.assign(nested, nextExecution);
+					nested.signal = mergeAbortSignals(
+						lifecycleSignal,
+						nextExecution?.signal,
+					);
+					nested.deadline =
 						nextExecution?.deadline ??
 						effectiveExecutionDeadline ??
-						Date.now() + executionTimeoutMs,
-				},
+						Date.now() + executionTimeoutMs;
+					return nested as ToolExecutionContext;
+				})(),
 				executionTimeoutMs,
 				executionDeadline:
 					nextExecution?.deadline ?? effectiveExecutionDeadline,

@@ -2,18 +2,20 @@
 import {
 	cp,
 	mkdtemp,
-	mkdir,
 	readFile,
 	readdir,
 	rm,
 	stat,
+	symlink,
 	writeFile,
 } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { fixOpenAPISpec, validateOpenAPISpec } from "./openapi-spec.js";
+import { isString } from "./runtime-value-predicates.mjs";
 
 const require = createRequire(import.meta.url);
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -219,12 +221,11 @@ export async function resolvePackageExecutable(packageName, binName) {
 		);
 	}
 	const packageBin = packageJson.bin;
-	const binary =
-		typeof packageBin === "string"
-			? packageBin
-			: (packageBin?.[binName] ?? packageBin?.[packageName]);
+	const binary = isString(packageBin)
+		? packageBin
+		: (packageBin?.[binName] ?? packageBin?.[packageName]);
 
-	if (typeof binary !== "string" || binary.length === 0) {
+	if (!isString(binary) || binary.length === 0) {
 		throw new Error(
 			`Package ${packageName} does not declare a ${binName} executable`,
 		);
@@ -358,9 +359,7 @@ async function readNormalizedSpec() {
 }
 
 async function createFixtureRepository(normalizedSpec) {
-	const fixtureParent = resolve(repositoryRoot, "node_modules/.cache");
-	await mkdir(fixtureParent, { recursive: true });
-	const root = await mkdtemp(join(fixtureParent, "generated-client-check-"));
+	const root = await mkdtemp(join(tmpdir(), "hevy-generated-client-check-"));
 	try {
 		const fixtureClient = resolve(root, "packages/hevy-client");
 		await cp(clientRoot, fixtureClient, {
@@ -371,9 +370,28 @@ async function createFixtureRepository(normalizedSpec) {
 			recursive: true,
 			force: true,
 		});
+		// Preserve workspace dependency resolution for the copied package.
+		// The fixture intentionally excludes node_modules from the copy, but
+		// its curated barrel TypeScript check still needs declared dependencies.
+		await symlink(
+			resolve(clientRoot, "node_modules"),
+			resolve(fixtureClient, "node_modules"),
+			"junction",
+		);
 		await cp(
 			resolve(repositoryRoot, "tsconfig.base.json"),
 			resolve(root, "tsconfig.base.json"),
+		);
+		await cp(
+			resolve(repositoryRoot, ".oxfmtrc.json"),
+			resolve(root, ".oxfmtrc.json"),
+		);
+		// Kubb loads the copied config from the temporary tree, so expose the
+		// repository dependencies there without copying the entire installation.
+		await symlink(
+			resolve(repositoryRoot, "node_modules"),
+			resolve(root, "node_modules"),
+			"junction",
 		);
 		await writeFile(
 			resolve(root, "openapi-spec.json"),
@@ -397,15 +415,15 @@ export async function checkGeneratedClient() {
 	try {
 		fixture = await createFixtureRepository(normalized);
 		const kubb = await resolvePackageExecutable("@kubb/cli", "kubb");
-		const prettier = await resolvePackageExecutable("prettier", "prettier");
+		const oxfmt = await resolvePackageExecutable("oxfmt", "oxfmt");
 		await runCommand(
 			kubb.command,
 			[...kubb.args, "generate", "--config", "./kubb.config.ts"],
 			fixture.client,
 		);
 		await runCommand(
-			prettier.command,
-			[...prettier.args, "--ignore-unknown", "--write", generatedRelative],
+			oxfmt.command,
+			[...oxfmt.args, "--write", generatedRelative],
 			fixture.client,
 		);
 

@@ -1,5 +1,12 @@
 /* oxlint-disable typescript/unbound-method */
 import type { HevyClient } from "@hevy-mcp/hevy-client";
+import {
+	routinesGetDescriptor,
+	routinesListDescriptor,
+	workoutsGetDescriptor,
+	workoutsListDescriptor,
+	type HevyOperations,
+} from "@hevy-mcp/operations";
 import { describe, expect, it, vi } from "vitest";
 import type { CliArgs } from "../arguments.js";
 import { ApiResponseError } from "../errors.js";
@@ -73,12 +80,66 @@ const routine = {
 		],
 	},
 };
-const options = (data: unknown): CliArgs["options"] => ({
+type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
+type JsonObject = { readonly [key: string]: JsonValue };
+
+const options = (data: JsonObject): CliArgs["options"] => ({
 	data: JSON.stringify(data),
 	yes: true,
 });
 
 describe("execute command/API mappings", () => {
+	it("uses the injected routines list operation while retaining the page envelope", async () => {
+		const api = client();
+		const executeList = vi.fn().mockResolvedValue({
+			items: [{ id: "r1", title: "Push", exercises: [] }],
+			page: 2,
+			pageCount: 3,
+		});
+		const operations = {
+			routines: {
+				get: { descriptor: routinesGetDescriptor, execute: vi.fn() },
+				list: { descriptor: routinesListDescriptor, execute: executeList },
+			},
+			workouts: {
+				get: { descriptor: workoutsGetDescriptor, execute: vi.fn() },
+				list: { descriptor: workoutsListDescriptor, execute: vi.fn() },
+			},
+		} satisfies HevyOperations;
+
+		await expect(
+			execute(
+				args("routines", "list", [], { page: "2" }),
+				api,
+				undefined,
+				undefined,
+				operations,
+			),
+		).resolves.toEqual({
+			page: 2,
+			page_count: 3,
+			routines: [{ id: "r1", title: "Push", exercises: [] }],
+		});
+		expect(executeList).toHaveBeenCalledWith({ page: 2, pageSize: 5 });
+		expect(api.getRoutines).not.toHaveBeenCalled();
+
+		executeList.mockResolvedValue({
+			items: [],
+			page: 2,
+			pageCount: undefined,
+			expected404Outcome: "end_of_list",
+		});
+		await expect(
+			execute(
+				args("routines", "list", [], { page: "2" }),
+				api,
+				undefined,
+				undefined,
+				operations,
+			),
+		).resolves.toEqual({ page: 2, page_count: 0, routines: [] });
+	});
+
 	it.each([
 		["user", undefined, [], "getUserInfo"],
 		["workouts", "list", [], "getWorkouts"],
@@ -160,6 +221,44 @@ describe("execute command/API mappings", () => {
 			() => new Date("2024-02-01"),
 		);
 		expect(summary).toMatchObject({ pages_scanned: 1, complete: true });
+
+		vi.mocked(api.getWorkouts)
+			.mockResolvedValueOnce({
+				page: 1,
+				page_count: 2,
+				workouts: [
+					{
+						start_time: "2023-01-01T00:00:00Z",
+						end_time: "2023-01-01T01:00:00Z",
+						exercises: [],
+					},
+				],
+			})
+			.mockResolvedValueOnce({
+				page: 2,
+				page_count: 2,
+				workouts: [
+					{
+						start_time: "2024-01-30T00:00:00Z",
+						end_time: "2024-01-30T01:00:00Z",
+						exercises: [],
+					},
+				],
+			});
+		const laterPage = await execute(
+			args("summary"),
+			api,
+			() => new Date("2024-02-01"),
+		);
+		expect(vi.mocked(api.getWorkouts)).toHaveBeenNthCalledWith(3, {
+			page: 2,
+			pageSize: 10,
+		});
+		expect(laterPage).toMatchObject({
+			workout_count: 1,
+			pages_scanned: 2,
+			complete: true,
+		});
 	});
 
 	it("forwards API-shaped mutation envelopes unchanged", async () => {

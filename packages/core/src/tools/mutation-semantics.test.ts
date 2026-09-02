@@ -250,7 +250,10 @@ describe("mutation semantics", () => {
 			exercises: [],
 		};
 
-		const payload = buildWorkoutUpdatePayload(current, { title: "Renamed" });
+		const payload = buildWorkoutUpdatePayload(current, {
+			title: "Renamed",
+			is_private: false,
+		});
 
 		expect(payload).toMatchObject({
 			title: "Renamed",
@@ -258,8 +261,74 @@ describe("mutation semantics", () => {
 			start_time: current.start_time,
 			end_time: current.end_time,
 			exercises: [],
+			is_private: false,
 		});
-		expect(payload).not.toHaveProperty("is_private");
+	});
+
+	it("normalizes ISO timestamp variants returned by Hevy", () => {
+		const payload = buildWorkoutUpdatePayload(
+			{
+				title: "Original",
+				start_time: "2026-07-29T08:00:00.123Z",
+				end_time: "2026-07-29T11:00:00+02:00",
+				exercises: [],
+			},
+			{ title: "Renamed", is_private: false },
+		);
+
+		expect(payload).toMatchObject({
+			start_time: "2026-07-29T08:00:00Z",
+			end_time: "2026-07-29T09:00:00Z",
+		});
+		expect(
+			buildWorkoutUpdatePayload(
+				{
+					title: "Original",
+					start_time: "2026-07-29T08:00:00.000Z",
+					end_time: "2026-07-29T09:00:00Z",
+					exercises: [],
+				},
+				{ title: "Renamed", is_private: false },
+			).start_time,
+		).toBe("2026-07-29T08:00:00Z");
+	});
+
+	it("rejects malformed fetched timestamps instead of relying on Date parsing", () => {
+		for (const start_time of [
+			"2026-02-30T08:00:00Z",
+			"0",
+			"2026-07-29T08:00:00",
+		]) {
+			expect(() =>
+				buildWorkoutUpdatePayload(
+					{
+						title: "Original",
+						start_time,
+						end_time: "2026-07-29T09:00:00Z",
+						exercises: [],
+					},
+					{ title: "Renamed", is_private: false },
+				),
+			).toThrow();
+		}
+	});
+
+	it("keeps caller-supplied timestamps strict", () => {
+		expect(() =>
+			buildWorkoutUpdatePayload(
+				{
+					title: "Original",
+					start_time: "2026-07-29T08:00:00Z",
+					end_time: "2026-07-29T09:00:00Z",
+					exercises: [],
+				},
+				{
+					title: "Renamed",
+					start_time: "2026-07-29T08:00:00.123Z",
+					is_private: false,
+				},
+			),
+		).toThrow();
 	});
 
 	it("replaces or removes exercises without requiring fetched exercises", () => {
@@ -276,11 +345,18 @@ describe("mutation semantics", () => {
 		];
 
 		expect(
-			buildWorkoutUpdatePayload(current, { title: "Renamed" }, replacement)
-				.exercises,
+			buildWorkoutUpdatePayload(
+				current,
+				{ title: "Renamed", is_private: false },
+				replacement,
+			).exercises,
 		).toEqual(replacement);
 		expect(
-			buildWorkoutUpdatePayload(current, { title: "Renamed" }, []).exercises,
+			buildWorkoutUpdatePayload(
+				current,
+				{ title: "Renamed", is_private: false },
+				[],
+			).exercises,
 		).toEqual([]);
 	});
 
@@ -337,7 +413,7 @@ describe("mutation semantics", () => {
 
 		for (const current of malformed) {
 			expect(() =>
-				buildWorkoutUpdatePayload(current, { title: "New" }),
+				buildWorkoutUpdatePayload(current, { title: "New", is_private: false }),
 			).not.toThrow();
 		}
 		expect(
@@ -351,17 +427,19 @@ describe("mutation semantics", () => {
 						},
 					],
 				},
-				{ title: "New" },
+				{ title: "New", is_private: false },
 			).exercises,
 		).toMatchObject([{ sets: [{ type: "invalid", rpe: 5, reps: 1.5 }] }]);
 		expect(
-			buildWorkoutUpdatePayload({ ...valid, exercises: [] }, { title: "New" })
-				.exercises,
+			buildWorkoutUpdatePayload(
+				{ ...valid, exercises: [] },
+				{ title: "New", is_private: false },
+			).exercises,
 		).toEqual([]);
 		expect(() =>
 			buildWorkoutUpdatePayload(
 				{ ...valid, start_time: undefined },
-				{ title: "New" },
+				{ title: "New", is_private: false },
 			),
 		).toThrow();
 	});

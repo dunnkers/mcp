@@ -14,7 +14,11 @@ import type {
 	WorkoutExerciseInput,
 	WorkoutMetadataPatchInput,
 } from "./input-schemas.js";
+import { WORKOUT_PUT_REQUIRES_IS_PRIVATE } from "./hevy-quirks.js";
 import { utcSecondTimestamp } from "../utils/schemas.js";
+import { isFiniteNumber, isString } from "../utils/type-predicates.js";
+import type { RuntimeValue } from "../utils/type-predicates.js";
+import { SafeUserError } from "../utils/safe-user-error.js";
 
 type RoutineRepRange = { start?: number; end?: number } | null;
 
@@ -65,10 +69,9 @@ function buildRoutineSets(
 ): PostRoutinesRequestSet[] | PutRoutinesRequestSet[] {
 	return sets.map((set) => {
 		const repRange = buildRepRange(set.rep_range);
-		const reps =
-			typeof set.reps === "number"
-				? set.reps
-				: getFixedRepsFromRepRange(repRange);
+		const reps = isFiniteNumber(set.reps)
+			? set.reps
+			: getFixedRepsFromRepRange(repRange);
 		const common = {
 			weight_kg: set.weight_kg ?? null,
 			reps: reps ?? null,
@@ -84,11 +87,9 @@ function buildRoutineSets(
 				rep_range: repRange,
 			};
 		}
-		return {
-			...common,
-			type: set.type,
-			...(repRange ? { rep_range: repRange } : {}),
-		};
+		const payload: PutRoutinesRequestSet = { ...common, type: set.type };
+		if (repRange) payload.rep_range = repRange;
+		return payload;
 	});
 }
 
@@ -168,6 +169,58 @@ const workoutUpdateMetadataSchema = z.object({
 	end_time: utcSecondTimestamp,
 });
 
+const FETCHED_ISO_TIMESTAMP =
+	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/u;
+
+/**
+ * Hevy documents ISO 8601 timestamps but can return millisecond or offset
+ * variants. Normalize only those explicit-timezone variants before reusing
+ * fetched values in the API's second-precision update contract. Caller-
+ * supplied values remain strict.
+ */
+function normalizeFetchedWorkoutTimestamp(value: RuntimeValue): RuntimeValue {
+	if (!isString(value)) return value;
+	const match = FETCHED_ISO_TIMESTAMP.exec(value);
+	if (!match) return value;
+
+	const [, year, month, day, hour, minute, second, offset] = match;
+	const numericMonth = Number(month);
+	const numericDay = Number(day);
+	const numericHour = Number(hour);
+	const numericMinute = Number(minute);
+	const numericSecond = Number(second);
+	const offsetHour = offset === "Z" ? 0 : Number(offset.slice(1, 3));
+	const offsetMinute = offset === "Z" ? 0 : Number(offset.slice(4, 6));
+	if (
+		numericMonth < 1 ||
+		numericMonth > 12 ||
+		numericDay < 1 ||
+		numericDay > 31 ||
+		numericHour > 23 ||
+		numericMinute > 59 ||
+		numericSecond > 59 ||
+		offsetHour > 23 ||
+		offsetMinute > 59
+	) {
+		return value;
+	}
+
+	const calendarDate = new Date(`${year}-${month}-${day}T00:00:00.000Z`);
+	if (
+		Number.isNaN(calendarDate.getTime()) ||
+		calendarDate.getUTCFullYear() !== Number(year) ||
+		calendarDate.getUTCMonth() !== numericMonth - 1 ||
+		calendarDate.getUTCDate() !== numericDay
+	) {
+		return value;
+	}
+
+	const timestamp = new Date(value);
+	if (Number.isNaN(timestamp.getTime())) return value;
+	timestamp.setUTCMilliseconds(0);
+	return `${timestamp.toISOString().slice(0, 19)}Z`;
+}
+
 /**
  * Map fetched API exercises to the update shape without validating legacy data.
  * Caller-supplied replacement exercises are still validated by their input schema.
@@ -181,17 +234,19 @@ function preserveWorkoutExercises(
 			superset_id: exercise.supersets_id ?? null,
 			notes: exercise.notes ?? null,
 			sets:
-				exercise.sets?.map((set) => ({
-					...(set.type === undefined
-						? {}
-						: { type: set.type as WorkoutUpdateSet["type"] }),
-					weight_kg: set.weight_kg ?? null,
-					reps: set.reps ?? null,
-					distance_meters: set.distance_meters ?? null,
-					duration_seconds: set.duration_seconds ?? null,
-					rpe: set.rpe as WorkoutUpdateSet["rpe"],
-					custom_metric: set.custom_metric ?? null,
-				})) ?? [],
+				exercise.sets?.map((set) => {
+					const updateSet: WorkoutUpdateSet = {
+						weight_kg: set.weight_kg ?? null,
+						reps: set.reps ?? null,
+						distance_meters: set.distance_meters ?? null,
+						duration_seconds: set.duration_seconds ?? null,
+						rpe: set.rpe as WorkoutUpdateSet["rpe"],
+						custom_metric: set.custom_metric ?? null,
+					};
+					if (set.type !== undefined)
+						updateSet.type = set.type as WorkoutUpdateSet["type"];
+					return updateSet;
+				}) ?? [],
 		})) ?? []
 	);
 }
@@ -201,14 +256,27 @@ export function buildWorkoutUpdatePayload(
 	patch: WorkoutMetadataPatchInput,
 	replacementExercises?: WorkoutExerciseInput[],
 ): WorkoutUpdatePayload {
+	// When doing a metadata-only update (not replacing exercises), the Hevy API
+	// requires is_private in the PUT request, but the GET endpoint does not return it.
+	// Therefore, is_private must be explicitly provided for metadata updates.
+	const isMetadataOnlyUpdate = replacementExercises === undefined;
+	if (isMetadataOnlyUpdate && patch.is_private === undefined) {
+		throw new SafeUserError(WORKOUT_PUT_REQUIRES_IS_PRIVATE.error);
+	}
+
 	const metadata = workoutUpdateMetadataSchema.parse({
 		title: patch.title !== undefined ? patch.title : current.title,
 		start_time:
-			patch.start_time !== undefined ? patch.start_time : current.start_time,
-		end_time: patch.end_time !== undefined ? patch.end_time : current.end_time,
+			patch.start_time !== undefined
+				? patch.start_time
+				: normalizeFetchedWorkoutTimestamp(current.start_time),
+		end_time:
+			patch.end_time !== undefined
+				? patch.end_time
+				: normalizeFetchedWorkoutTimestamp(current.end_time),
 	});
 
-	return {
+	const payload: WorkoutUpdatePayload = {
 		...metadata,
 		description:
 			patch.description !== undefined
@@ -218,8 +286,9 @@ export function buildWorkoutUpdatePayload(
 			replacementExercises === undefined
 				? preserveWorkoutExercises(current)
 				: replacementExercises,
-		...(patch.is_private !== undefined ? { is_private: patch.is_private } : {}),
 	};
+	if (patch.is_private !== undefined) payload.is_private = patch.is_private;
+	return payload;
 }
 
 export type MeasurementPayload = Omit<BodyMeasurement, "date">;
@@ -258,10 +327,15 @@ export function buildMeasurementPayload(
 	return payload;
 }
 
+export type MeasurementMergeResult = {
+	payload: MeasurementPayload;
+	measurement: BodyMeasurement;
+};
+
 export function mergeMeasurementPayload(
 	existing: BodyMeasurement,
 	changes: MeasurementFields,
-): { payload: MeasurementPayload; measurement: BodyMeasurement } {
+): MeasurementMergeResult {
 	const payload: MeasurementPayload = {};
 	const measurement = { ...existing };
 

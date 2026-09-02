@@ -91,12 +91,39 @@ Try asking:
 > Create a completed workout from my saved routine. Ask me for any missing set
 > results before writing it to Hevy.
 
+## Claude integration
+
+The repository includes a Claude plugin that connects to the hosted OAuth-enabled
+MCP endpoint without embedding a user's Hevy API key.
+
+### Claude.ai and Claude Desktop
+
+In Claude, open **Settings → Connectors → Add custom connector** and enter:
+
+```text
+https://mcp.hevy-mcp.dev/mcp
+```
+
+Complete the OAuth flow and enter the Hevy API key when prompted. The same
+remote endpoint can be used by Claude Desktop and other clients that support
+remote MCP connectors.
+
+### Claude Code and Cowork
+
+The Claude plugin is defined by [`.claude-plugin/plugin.json`](./.claude-plugin/plugin.json)
+and [`.mcp.json`](./.mcp.json). Install it from this public repository or from
+the Claude Plugin Directory after publication. It adds the hosted Hevy MCP
+connector and the [Hevy workout skill](./skills/hevy-workouts/SKILL.md).
+
+See the [privacy policy](./docs/privacy-policy.md) for the hosted service's
+data handling details.
+
 ## Quick start
 
 ### 1. Get your Hevy API key
 
-Create an API key in Hevy, then keep it somewhere secure. API access currently
-requires a Hevy PRO subscription.
+Create an API key in [Hevy's API settings](https://www.hevyapp.com/api), then
+keep it somewhere secure. API access currently requires a Hevy PRO subscription.
 
 ### 2. Connect `hevy-mcp` to your client
 
@@ -373,16 +400,16 @@ These server-provided MCP prompts coordinate common multi-step workflows:
 and update tools are exposed with MCP mutation annotations so compatible clients
 can request confirmation.
 
-| Category          | Tool                   | Description                                                                       |
-| ----------------- | ---------------------- | --------------------------------------------------------------------------------- |
-| Training analysis | `get-training-summary` | Summarize 1-12 weeks of workout activity and body-measurement trends in one call. |
-| Workouts          | `get-workouts`         | List workouts from newest to oldest with exercise and timing details.             |
-| Workouts          | `get-workout`          | Get complete details for one workout by ID.                                       |
+| Category          | Tool                   | Description                                                                           |
+| ----------------- | ---------------------- | ------------------------------------------------------------------------------------- |
+| Training analysis | `get-training-summary` | Summarize 1-12 weeks of workout activity and body-measurement trends in one call.     |
+| Workouts          | `get-workouts`         | List workouts in Hevy API order, not by start time, with exercise and timing details. |
+| Workouts          | `get-workout`          | Get complete details for one workout by ID.                                           |
 
 | Workouts | `get-workout-events` | List workout update and delete events since a timestamp. |
 | Workouts | `create-workout` | Create a completed workout in Hevy. |
-| Workouts | `update-workout` | Patch workout metadata by ID; omitted fields and all exercises remain unchanged. |
-| Workouts | `replace-workout-exercises` | Replace all exercises and sets while preserving workout metadata. |
+| Workouts | `update-workout` | Patch workout metadata by ID; `is_private` is required, while other omitted fields and all exercises remain unchanged. |
+| Workouts | `replace-workout-exercises` | Replace all exercises and sets; `is_private` is required and updated, while other workout metadata remains unchanged. |
 | Routines | `search-routines` | Search routine titles and return compact metadata for discovery. |
 | Routines | `get-routines` | List custom and default workout routines. |
 | Routines | `get-routine` | Get one routine and its exercise configuration by ID. |
@@ -400,6 +427,35 @@ can request confirmation.
 | Body measurements | `get-body-measurement` | Get the body measurement entry for one date. |
 | Body measurements | `create-body-measurement` | Create a dated body measurement. |
 | Body measurements | `update-body-measurement` | Update the body measurement for an existing date. |
+
+`create-routine` requires a top-level `routine` envelope with a required `exercises` array; fields use snake_case at every level:
+
+```json
+{
+	"routine": {
+		"title": "Full Body A",
+		"folder_id": 123,
+		"notes": "First four exercises are the minimum viable workout",
+		"exercises": [
+			{
+				"exercise_template_id": "30E293E3",
+				"superset_id": null,
+				"rest_seconds": 120,
+				"notes": "Controlled active ROM",
+				"sets": [
+					{
+						"type": "normal",
+						"rep_range": {
+							"start": 6,
+							"end": 10
+						}
+					}
+				]
+			}
+		]
+	}
+}
+```
 
 The Hevy API currently exposes no delete endpoints for workouts, routines,
 routine folders, exercise templates, or body measurements, so there are no
@@ -454,7 +510,8 @@ header, such as Claude.ai custom connectors. Self-hosted Workers can opt in by
 following the `OAUTH_KV` setup in [CONTRIBUTING.md](./CONTRIBUTING.md):
 
 - RFC 8414 / RFC 9728 discovery metadata under `/.well-known/`
-- Dynamic client registration (`/register`) and PKCE token exchange (`/token`)
+- Client ID Metadata Documents (CIMD), with dynamic client registration
+  (`/register`) as a fallback, and PKCE token exchange (`/token`)
 - An `/authorize` page where you paste your Hevy API key once; the key is
   validated with Hevy and stored encrypted inside the OAuth grant
 
@@ -470,8 +527,8 @@ refresh for supported clients.
 
 The endpoint does not expose legacy SSE or a `GET` event stream. Without the
 opt-in OAuth layer, clients that require OAuth discovery, dynamic
-registration, or token refresh are not compatible unless they can send the
-fixed custom header above.
+registration, CIMD, or token refresh are not compatible unless they can send
+the fixed custom header above.
 
 ### Self-host the Worker
 
@@ -491,9 +548,13 @@ self-hosted Streamable HTTP.
 | Setting                          | Default                          | Scope                         | Notes                                                                                                          |
 | -------------------------------- | -------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `HEVY_API_KEY`                   | None; required                   | Local stdio or HTTP           | Hevy API key from the Hevy app. Never pass it in a URL.                                                        |
-| `HEVY_MCP_API_TIMEOUT`           | `30000` ms                       | Local stdio                   | Positive Hevy API timeout in milliseconds. Invalid values fall back to 30 seconds.                             |
+| `HEVY_MCP_API_TIMEOUT`           | `60000` ms                       | Local stdio                   | Positive Hevy API timeout in milliseconds. Invalid values fall back to 60 seconds.                             |
 | `HEVY_MCP_DEBUG`                 | Disabled                         | Local Node                    | Set to exactly `1` for privacy-bounded diagnostics on stderr. Stdout remains reserved for MCP JSON-RPC.        |
 | `HEVY_MCP_HTTP_BEARER_TOKEN`     | None                             | Non-loopback HTTP             | Required when `--host` is not loopback; use a separate token, never the Hevy API key.                          |
+| `HEVY_MCP_HTTP_MAX_SESSIONS`     | `100`                            | Local HTTP                    | Maximum established sessions, including sessions currently initializing; excess requests receive `429`.        |
+| `HEVY_MCP_HTTP_MAX_INITIALIZING` | `10`                             | Local HTTP                    | Maximum concurrent session initializations; excess requests receive `503` and are not queued.                  |
+| `HEVY_MCP_HTTP_IDLE_TIMEOUT_MS`  | `1800000` ms                     | Local HTTP                    | Idle sessions are evicted after 30 minutes; each session request resets the timer.                             |
+| `HEVY_MCP_HTTP_BODY_TIMEOUT_MS`  | `30000` ms                       | Local HTTP                    | Stalled request bodies receive `408`; values are bounded to five minutes.                                      |
 | `HEVY_MCP_TELEMETRY`             | Enabled                          | Local Node                    | Set to exactly `0` before startup/import to disable Sentry and OTLP traces/metrics.                            |
 | `HEVY_MCP_TELEMETRY_DIAGNOSTICS` | Enabled                          | Local Node                    | Set to exactly `0` to keep structural telemetry while suppressing exception messages and stacks.               |
 | `XDG_CACHE_HOME`                 | `~/.cache`                       | Local stdio                   | Changes the root for the npm update-check cache at `hevy-mcp/update-check.json`.                               |
@@ -595,8 +656,11 @@ metadata, and unnormalized endpoint paths remain prohibited.
   `npx -y hevy-mcp --version` in a terminal.
 - **Codex cannot see the server:** run `codex mcp list`, then start a new Codex
   session after confirming the `hevy` entry exists.
-- **Hosted authentication fails:** confirm the key is active, belongs to a Hevy
-  PRO account, and is sent as `Authorization: Bearer <HEVY_API_KEY>`.
+- **Hevy API returns 401:** the key is invalid, expired, revoked, or
+  misconfigured. Verify or create an active key at
+  [Hevy's API settings](https://www.hevyapp.com/api), then restart the client.
+- **Hosted authentication fails:** confirm the key belongs to a Hevy PRO
+  account and is sent as `Authorization: Bearer <HEVY_API_KEY>`.
 - **Local authentication fails:** confirm the key is active and available to the
   MCP child process as `HEVY_API_KEY`.
 - **Need diagnostics:** set `HEVY_MCP_DEBUG=1`. Diagnostic output goes to stderr

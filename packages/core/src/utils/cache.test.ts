@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createSafeErrorDiagnostic } from "./safe-error-diagnostic.js";
+import { createSafeErrorDiagnostic } from "./error-policy.js";
 import { AsyncTtlCache } from "./cache.js";
 
 describe("AsyncTtlCache", () => {
@@ -49,7 +49,7 @@ describe("AsyncTtlCache", () => {
 			maxSize: 2,
 		});
 
-		const fetcher = vi.fn(async (key: string) => `${key}-value`);
+		const fetcher = vi.fn((key: string) => Promise.resolve(`${key}-value`));
 		const load = (key: string) => cache.getOrFetch(key, () => fetcher(key));
 
 		await load("a");
@@ -192,7 +192,7 @@ describe("AsyncTtlCache", () => {
 			},
 		);
 		controller.abort(new DOMException("caller cancelled", "AbortError"));
-		const error = await second.catch((reason: unknown) => reason);
+		const error = await second.catch((reason: Error | string) => reason);
 		expect(createSafeErrorDiagnostic(error)).toMatchObject({
 			outcome: "cancelled",
 			commit_state: "unknown",

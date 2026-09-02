@@ -1,14 +1,40 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { networkInterfaces } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
 	Client,
+	type CallToolResult,
+	type JSONObject,
+	type JSONValue,
 	StreamableHTTPClientTransport,
 	LATEST_PROTOCOL_VERSION,
 } from "@modelcontextprotocol/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
+
+const stringSchema = z.string();
+const jsonValueSchema: z.ZodType<JSONValue> = z.lazy(() =>
+	z.union([
+		z.string(),
+		z.number(),
+		z.boolean(),
+		z.null(),
+		z.array(jsonValueSchema),
+		z.record(z.string(), jsonValueSchema),
+	]),
+);
+const jsonObjectSchema: z.ZodType<JSONObject> = z.record(
+	z.string(),
+	jsonValueSchema,
+);
+
+function isString(value: JSONValue | null): value is string {
+	return stringSchema.safeParse(value).success;
+}
 
 const LOOPBACK = "127.0.0.1";
 const BROWSER_ORIGIN = "https://chatgpt.com";
@@ -33,6 +59,7 @@ let fakeHevyBaseUrl: string;
 let redirectRecorderServer: Server;
 let redirectDestinationUrl: string;
 let wrangler: ChildProcessWithoutNullStreams;
+let wranglerPersistDir: string | undefined;
 let workerBaseUrl: string;
 let wranglerLogs = "";
 let wranglerSpawnError: Error | undefined;
@@ -91,6 +118,11 @@ async function allocateWranglerPorts(): Promise<{
 }
 
 function spawnWrangler(workerPort: number, inspectorPort: number): void {
+	if (wranglerPersistDir === undefined) {
+		throw new Error(
+			"spawnWrangler called before the persistence directory was created",
+		);
+	}
 	workerBaseUrl = `http://${LOOPBACK}:${workerPort}`;
 	wranglerSpawnError = undefined;
 	const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
@@ -117,6 +149,8 @@ function spawnWrangler(workerPort: number, inspectorPort: number): void {
 			"--show-interactive-dev-session=false",
 			"--log-level",
 			"warn",
+			"--persist-to",
+			wranglerPersistDir,
 			"--var",
 			`HEVY_API_BASE_URL:${fakeHevyBaseUrl}`,
 		],
@@ -137,27 +171,35 @@ function spawnWrangler(workerPort: number, inspectorPort: number): void {
 function writeJson(
 	response: import("node:http").ServerResponse,
 	status: number,
-	body: unknown,
+	body: JSONValue,
 ): void {
 	response.writeHead(status, { "content-type": "application/json" });
 	response.end(JSON.stringify(body));
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
+function isRecord(
+	value: JSONValue | CallToolResult | null,
+): value is JSONObject {
+	return jsonObjectSchema.safeParse(value).success;
 }
 
-function requireRecord(value: unknown, label: string): Record<string, unknown> {
+function requireRecord(value: JSONValue, label: string): JSONObject {
 	if (!isRecord(value)) {
 		throw new Error(`Expected ${label} to be an object`);
 	}
 	return value;
 }
 
-function requireArrayField(
-	record: Record<string, unknown>,
-	field: string,
-): unknown[] {
+function requireJsonObject(
+	value: CallToolResult["structuredContent"],
+	label: string,
+): JSONObject {
+	const parsed = jsonObjectSchema.safeParse(value);
+	if (!parsed.success) throw new Error(`Expected ${label} to be an object`);
+	return parsed.data;
+}
+
+function requireArrayField(record: JSONObject, field: string): JSONValue[] {
 	const value = record[field];
 	if (!Array.isArray(value)) {
 		throw new Error(`Expected ${field} to be an array`);
@@ -165,17 +207,24 @@ function requireArrayField(
 	return value;
 }
 
+interface ToolListPayload {
+	firstItem: JSONObject;
+	items: JSONValue[];
+	text: string;
+}
+
 function requireToolListPayload(
-	result: unknown,
+	result: CallToolResult,
 	field: string,
-): { firstItem: Record<string, unknown>; items: unknown[]; text: string } {
-	const resultRecord = requireRecord(result, "MCP tool response");
+): ToolListPayload {
+	if (!isRecord(result)) throw new Error("Expected a tool result object");
+	const resultRecord = result;
 	const content = requireArrayField(resultRecord, "content");
 	const firstContent = requireRecord(content[0], "content[0]");
-	if (firstContent.type !== "text" || typeof firstContent.text !== "string") {
+	if (firstContent.type !== "text" || !isString(firstContent.text)) {
 		throw new Error("Expected text content in MCP tool response");
 	}
-	const structuredContent = requireRecord(
+	const structuredContent = requireJsonObject(
 		resultRecord.structuredContent,
 		"structuredContent",
 	);
@@ -186,7 +235,7 @@ function requireToolListPayload(
 
 async function waitForWranglerReady(): Promise<void> {
 	const deadline = Date.now() + STARTUP_TIMEOUT_MS;
-	let lastError: unknown;
+	let lastError: Error | string | undefined;
 	while (Date.now() < deadline) {
 		if (wranglerSpawnError) throw wranglerSpawnError;
 		if (wrangler.exitCode !== null) {
@@ -202,7 +251,7 @@ async function waitForWranglerReady(): Promise<void> {
 			if (response.status === 404) return;
 			lastError = new Error(`Unexpected readiness status ${response.status}`);
 		} catch (error) {
-			lastError = error;
+			lastError = error instanceof Error ? error : String(error);
 		}
 		await delay(100);
 	}
@@ -212,16 +261,17 @@ async function waitForWranglerReady(): Promise<void> {
 }
 
 async function stopWrangler(): Promise<void> {
-	if (!wrangler || wrangler.exitCode !== null || wrangler.pid === undefined)
-		return;
+	const child = wrangler;
+	if (!child || child.exitCode !== null || child.pid === undefined) return;
+	const pid = child.pid;
 
 	const exited = new Promise<void>((resolve) =>
-		wrangler.once("exit", () => resolve()),
+		child.once("exit", () => resolve()),
 	);
 	const signalProcessGroup = (signal: NodeJS.Signals) => {
 		try {
-			if (process.platform === "win32") wrangler.kill(signal);
-			else process.kill(-wrangler.pid!, signal);
+			if (process.platform === "win32") child.kill(signal);
+			else process.kill(-pid, signal);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
 		}
@@ -273,7 +323,7 @@ function mcpHeaders(apiKey = VALID_API_KEY): Headers {
 	});
 }
 
-function initializeRequest(id = 1): Record<string, unknown> {
+function initializeRequest(id = 1): JSONObject {
 	return {
 		jsonrpc: "2.0",
 		id,
@@ -332,18 +382,27 @@ async function parseSseMessage(response: Response): Promise<{
 }> {
 	const rawPayload = await response.text();
 	const events = parseSseEvents(rawPayload);
-	if (events.length !== 1) {
+	const event = events[0];
+	if (events.length !== 1 || event === undefined) {
 		throw new Error(`Expected one SSE event, received ${events.length}`);
 	}
 	return {
-		event: events[0]!.event,
-		payload: JSON.parse(events[0]!.data) as unknown,
+		event: event.event,
+		payload: JSON.parse(event.data) as unknown,
 	};
 }
 
 describe.sequential("Wrangler-backed Worker HTTP integration", () => {
 	beforeAll(
 		async () => {
+			// A fresh, isolated Miniflare persistence directory per run: without
+			// this, local KV (including the Hevy key validation cache) survives
+			// across separate `wrangler dev` invocations via `.wrangler/state`,
+			// so a previous run's cached "valid" verdict for a fixed test API key
+			// would silently short-circuit this run's Hevy request assertions.
+			wranglerPersistDir = await mkdtemp(
+				join(tmpdir(), "hevy-mcp-worker-http-test-"),
+			);
 			redirectRecorderServer = createServer((request, response) => {
 				redirectRequests.push({
 					apiKey: request.headers["api-key"] as string | undefined,
@@ -493,6 +552,11 @@ describe.sequential("Wrangler-backed Worker HTTP integration", () => {
 			await stopWrangler();
 		} finally {
 			await Promise.all([close(fakeHevyServer), close(redirectRecorderServer)]);
+			// Guard against a failed mkdtemp (undefined dir): rm(undefined) would
+			// throw and mask whatever error made beforeAll fail in the first place.
+			if (wranglerPersistDir) {
+				await rm(wranglerPersistDir, { recursive: true, force: true });
+			}
 		}
 	}, 10_000);
 
@@ -582,7 +646,9 @@ describe.sequential("Wrangler-backed Worker HTTP integration", () => {
 				arguments: { page: 1, page_size: 1 },
 			});
 			expect(JSON.stringify(result)).toContain("worker-workout-1");
-			expect(hevyRequests.length - requestsBeforeToolCall).toBe(2);
+			// The preceding `connect()` (initialize) call already validated and
+			// cached this key, so the tool call itself skips re-validation.
+			expect(hevyRequests.length - requestsBeforeToolCall).toBe(1);
 			expect(transport.sessionId).toBeUndefined();
 			expect(
 				hevyRequests.every((request) => request.apiKey === VALID_API_KEY),
@@ -634,7 +700,7 @@ describe.sequential("Wrangler-backed Worker HTTP integration", () => {
 				});
 				const payload = requireToolListPayload(result, call.field);
 				expect(payload.firstItem.id).toBe(call.expectedId);
-				expect(typeof payload.firstItem.id).toBe("string");
+				expect(isString(payload.firstItem.id)).toBe(true);
 				if (call.name === "get-workouts" || call.name === "get-routines") {
 					expect(payload.firstItem.exercise_count).toBe(0);
 					expect(payload.firstItem.set_count).toBe(0);
@@ -685,8 +751,12 @@ describe.sequential("Wrangler-backed Worker HTTP integration", () => {
 		expect(invalid.status).toBe(401);
 		expect(invalid.headers.get("www-authenticate")).toBe("Bearer");
 		expect(unavailable.status).toBe(502);
+		// A 401 is never retried; a 503 is transient and retried twice (three
+		// attempts total) before the validation client gives up.
 		expect(hevyRequests.map((request) => request.apiKey)).toEqual([
 			INVALID_API_KEY,
+			UPSTREAM_FAILURE_API_KEY,
+			UPSTREAM_FAILURE_API_KEY,
 			UPSTREAM_FAILURE_API_KEY,
 		]);
 	});
@@ -715,7 +785,11 @@ describe.sequential("Wrangler-backed Worker HTTP integration", () => {
 		expect(await unsupported.json()).toMatchObject({ error: { code: -32000 } });
 		expect(invalidJson.status).toBe(400);
 		expect(await invalidJson.json()).toMatchObject({ error: { code: -32700 } });
-		expect(hevyRequests).toHaveLength(3);
+		// All three requests use the default valid key, and the very first test
+		// in this file ("routes requests and returns stateless SSE initialize
+		// responses") already validated and cached it — so none of these three
+		// need a real Hevy round trip.
+		expect(hevyRequests.length).toBe(0);
 	});
 
 	it("allows configured CORS origins and rejects unconfigured origins", async () => {

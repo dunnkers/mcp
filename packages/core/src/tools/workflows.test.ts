@@ -1,22 +1,33 @@
 import { describe, expect, it, vi } from "vitest";
-import type { HevyClient } from "@hevy-mcp/hevy-client";
+import { createMockHevyClient } from "../../test-fixtures/mock-hevy.js";
 import type { ExerciseTemplateCatalog } from "../utils/exercise-template-catalog.js";
 import { createToolRuntime } from "./tool-runtime.js";
 import {
-	fetchRecentPages,
+	scanPagesInWindow,
 	getTrainingSummary,
 	workflowToolDefinitions,
 } from "./workflows.js";
 
 describe("get-training-summary", () => {
-	it("combines bounded pages into snake_case compact evidence", async () => {
+	it("scans all bounded pages for in-window compact evidence", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-07-16T12:00:00Z"));
 		try {
-			const getWorkouts = vi
-				.fn()
+			const client = createMockHevyClient();
+			client.getWorkouts
 				.mockResolvedValueOnce({
 					page: 1,
+					page_count: 2,
+					workouts: [
+						{
+							id: "old",
+							start_time: "2026-05-01T08:00:00Z",
+							end_time: "2026-05-01T09:00:00Z",
+						},
+					],
+				})
+				.mockResolvedValueOnce({
+					page: 2,
 					page_count: 2,
 					workouts: [
 						{
@@ -27,28 +38,23 @@ describe("get-training-summary", () => {
 							exercises: [{ exercise_template_id: "bench", sets: [{}, {}] }],
 						},
 					],
+				});
+			client.getBodyMeasurements
+				.mockResolvedValueOnce({
+					page: 1,
+					page_count: 2,
+					body_measurements: [{ date: "2026-05-01", weight_kg: 81 }],
 				})
 				.mockResolvedValueOnce({
 					page: 2,
 					page_count: 2,
-					workouts: [
-						{
-							id: "old",
-							start_time: "2026-06-01T08:00:00Z",
-							end_time: "2026-06-01T09:00:00Z",
-						},
+					body_measurements: [
+						{ date: "2026-07-01", weight_kg: 80 },
+						{ date: "2026-07-15", weight_kg: 79 },
 					],
 				});
-			const getBodyMeasurements = vi.fn().mockResolvedValue({
-				page: 1,
-				page_count: 1,
-				body_measurements: [
-					{ date: "2026-07-01", weight_kg: 80 },
-					{ date: "2026-07-15", weight_kg: 79 },
-				],
-			});
 			const runtime = createToolRuntime({
-				client: { getWorkouts, getBodyMeasurements } as unknown as HevyClient,
+				client,
 				catalog: {} as ExerciseTemplateCatalog,
 			});
 			const summary = await getTrainingSummary(runtime, 4);
@@ -65,29 +71,29 @@ describe("get-training-summary", () => {
 			});
 			expect(summary.workflow).toEqual({
 				name: "training-summary",
-				pagination: { workouts: 2, body_measurements: 1 },
+				pagination: { workouts: 2, body_measurements: 2 },
 				cacheStatus: "not-used",
-				itemsScanned: 4,
+				itemsScanned: 5,
 			});
 		} finally {
 			vi.useRealTimers();
 		}
 	});
 
-	it("filters recent pages and stops after an older page", async () => {
+	it("scans older pages but stops at a valid page_count", async () => {
 		type Item = { date?: string; id: string };
 		const loader = vi
 			.fn()
 			.mockResolvedValueOnce({
-				items: [{ id: "recent", date: "2026-07-15" }, { id: "undated" }],
-				pageCount: 3,
+				items: [{ id: "old", date: "2026-06-01" }],
+				pageCount: 2,
 			})
 			.mockResolvedValueOnce({
-				items: [{ id: "old", date: "2026-06-01" }],
-				pageCount: 3,
+				items: [{ id: "recent", date: "2026-07-15" }],
+				pageCount: 2,
 			});
 		await expect(
-			fetchRecentPages<Item>(
+			scanPagesInWindow<Item>(
 				loader,
 				10,
 				"2026-07-01",
@@ -97,19 +103,22 @@ describe("get-training-summary", () => {
 		).resolves.toEqual({
 			items: [{ id: "recent", date: "2026-07-15" }],
 			pages: 2,
-			itemsScanned: 3,
+			itemsScanned: 2,
 		});
+		expect(loader).toHaveBeenNthCalledWith(1, 1, 10);
+		expect(loader).toHaveBeenNthCalledWith(2, 2, 10);
+		expect(loader).toHaveBeenCalledTimes(2);
 	});
 
 	it("keeps sparse collection results safe", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-07-16T12:00:00Z"));
 		try {
+			const client = createMockHevyClient();
+			client.getWorkouts.mockImplementation(() => undefined);
+			client.getBodyMeasurements.mockImplementation(() => undefined);
 			const runtime = createToolRuntime({
-				client: {
-					getWorkouts: vi.fn().mockResolvedValue(undefined),
-					getBodyMeasurements: vi.fn().mockResolvedValue(undefined),
-				} as unknown as HevyClient,
+				client,
 				catalog: {} as ExerciseTemplateCatalog,
 			});
 			await expect(

@@ -1,6 +1,6 @@
 {
 	"name": "@hevy-mcp/worker",
-	"version": "0.1.1",
+	"version": "0.2.9",
 	"private": true,
 	"type": "module",
 	"exports": {
@@ -14,12 +14,12 @@
 		"check:types": "tsc --noEmit -p tsconfig.json"
 	},
 	"dependencies": {
-		"@cloudflare/workers-oauth-provider": "^0.10.0",
+		"@cloudflare/workers-oauth-provider": "^0.10.3",
 		"@modelcontextprotocol/server": "^2.0.0",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
-		"@hevy-mcp/core": "*",
-		"@hevy-mcp/hevy-client": "*"
+		"@hevy-mcp/core": "workspace:*",
+		"@hevy-mcp/hevy-client": "workspace:*"
 	}
 }

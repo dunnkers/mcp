@@ -1,6 +1,11 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { load as parseYaml } from "js-yaml";
+import {
+	isNumber,
+	isObjectLike,
+	isString,
+} from "./runtime-value-predicates.mjs";
 
 function assert(condition, message) {
 	if (!condition) throw new Error(message);
@@ -37,7 +42,7 @@ function setupNodeRuntimeByMatrix(step, rootDir, versions) {
 	);
 	const options = step.with;
 	assert(
-		options && typeof options === "object",
+		options && isObjectLike(options),
 		"actions/setup-node must declare with.node-version or node-version-file",
 	);
 	const nodeVersion = options["node-version"];
@@ -48,7 +53,7 @@ function setupNodeRuntimeByMatrix(step, rootDir, versions) {
 	);
 
 	let configuration;
-	if (typeof nodeVersion === "string" || typeof nodeVersion === "number") {
+	if (isString(nodeVersion) || isNumber(nodeVersion)) {
 		const value = String(nodeVersion).trim();
 		if (value.includes("matrix.node-version")) {
 			assert(
@@ -63,7 +68,7 @@ function setupNodeRuntimeByMatrix(step, rootDir, versions) {
 			};
 		}
 	}
-	if (typeof nodeVersionFile === "string") {
+	if (isString(nodeVersionFile)) {
 		const path = resolve(rootDir, nodeVersionFile);
 		let version;
 		try {
@@ -141,8 +146,8 @@ function walkJobSteps(value, visit, path = []) {
 			walkJobSteps(item, visit, [...path, index]);
 		return;
 	}
-	if (!value || typeof value !== "object") return;
-	if (typeof value.run === "string" || typeof value.uses === "string") {
+	if (!value || !isObjectLike(value)) return;
+	if (isString(value.run) || isString(value.uses)) {
 		visit(value, path);
 		return;
 	}
@@ -150,18 +155,56 @@ function walkJobSteps(value, visit, path = []) {
 		walkJobSteps(child, visit, [...path, key]);
 }
 
-function parseNxRunCommand(line) {
-	const match =
-		/^\s*npx\s+nx\s+run\s+repository:([A-Za-z0-9][A-Za-z0-9:_-]*)(?:\s+(.*?))?\s*$/.exec(
-			line,
+function optionValue(tokens, longName, shortName) {
+	for (let index = 0; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (token.startsWith(`${longName}=`))
+			return token.slice(longName.length + 1);
+		if (token === longName || token === shortName)
+			return tokens[index + 1] ?? "";
+	}
+	return null;
+}
+
+function parseNxRunCommands(line) {
+	const normalized = line.trim().replace(/\s+/g, " ");
+	const direct =
+		/^npx nx run repository:([A-Za-z0-9][A-Za-z0-9:_-]*)(?: (.*?))?$/.exec(
+			normalized,
 		);
-	if (!match) return null;
-	const args = match[2]?.trim().replace(/\s+/g, " ") ?? "";
-	return {
-		target: match[1],
+	if (direct) {
+		const args = direct[2] ?? "";
+		return [
+			{
+				target: direct[1],
+				args,
+				command: `npx nx run repository:${direct[1]}${args ? ` ${args}` : ""}`,
+			},
+		];
+	}
+
+	const aggregate = /^npx nx run-many(?: (.*?))?$/.exec(normalized);
+	if (!aggregate) return [];
+	const args = aggregate[1] ?? "";
+	const tokens = args ? args.split(" ") : [];
+	const targetList = optionValue(tokens, "--targets", "-t");
+	if (targetList === null) return [];
+	const projectList = optionValue(tokens, "--projects", "-p");
+	assert(
+		projectList === "repository",
+		"Nx run-many must target only the repository project for workflow projection",
+	);
+	const targets = targetList.split(",").filter(Boolean);
+	assert(targets.length > 0, "Nx run-many must declare at least one target");
+	assert(
+		new Set(targets).size === targets.length,
+		"Nx run-many must not repeat targets",
+	);
+	return targets.map((target) => ({
+		target,
 		args,
-		command: `npx nx run repository:${match[1]}${args ? ` ${args}` : ""}`,
-	};
+		command: `npx nx run-many ${args}`,
+	}));
 }
 
 function normalizeLaneTargets(laneTargets) {
@@ -181,12 +224,12 @@ export function mappedLaneTargets(lanes) {
 	const targets = new Map();
 	for (const lane of lanes.lanes) {
 		assert(
-			typeof lane.id === "string" && lane.id.length > 0,
+			isString(lane.id) && lane.id.length > 0,
 			"validation lane id is required",
 		);
 		if (lane.mappingStatus === "mapped") {
 			assert(
-				typeof lane.nxTarget === "string" && lane.nxTarget.length > 0,
+				isString(lane.nxTarget) && lane.nxTarget.length > 0,
 				`${lane.id} mapped lane requires nxTarget`,
 			);
 			assert(
@@ -209,7 +252,8 @@ export function mappedLaneTargets(lanes) {
 }
 
 /**
- * Parse mapped `npx nx run repository:<target>` executions from a workflow.
+ * Parse mapped `nx run` and repository-scoped `nx run-many` executions from a
+ * workflow.
  * The returned entries retain the historical projection shape by default;
  * `includeCommands` adds the exact command identity for strict validation.
  */
@@ -220,19 +264,19 @@ export function parseWorkflowLaneExecutions(
 		laneTargets,
 		includeCommands = false,
 		jobIds,
+		rejectContinueOnError = false,
 	} = {},
 ) {
 	const workflow = parseYaml(source);
 	assert(
-		workflow && typeof workflow === "object",
+		workflow && isObjectLike(workflow),
 		"workflow must contain a YAML object",
 	);
 	const mappedTargets = normalizeLaneTargets(laneTargets);
 	const selectedJobs = jobIds === undefined ? null : new Set(jobIds);
 	if (selectedJobs) {
 		assert(
-			selectedJobs.size > 0 &&
-				[...selectedJobs].every((id) => typeof id === "string"),
+			selectedJobs.size > 0 && [...selectedJobs].every((id) => isString(id)),
 			"workflow jobIds must be a non-empty string array",
 		);
 	}
@@ -244,79 +288,103 @@ export function parseWorkflowLaneExecutions(
 		const steps = job.steps ?? [];
 		let hasMappedCommand = false;
 		walkJobSteps(steps, (step) => {
-			if (typeof step.run !== "string") return;
+			if (!isString(step.run)) return;
 			for (const line of step.run.split(/\r?\n/)) {
-				const command = parseNxRunCommand(line);
-				if (command && mappedTargets.has(command.target))
-					hasMappedCommand = true;
+				for (const command of parseNxRunCommands(line)) {
+					if (mappedTargets.has(command.target)) hasMappedCommand = true;
+				}
 			}
 		});
 		if (!hasMappedCommand) continue;
+		if (rejectContinueOnError) {
+			const continueOnError = job["continue-on-error"];
+			assert(
+				continueOnError === undefined ||
+					continueOnError === false ||
+					continueOnError === "false",
+				`Workflow job ${jobId} must not use continue-on-error for release lanes`,
+			);
+		}
 
-		let runtimeByMatrixValue;
-		let setupNodeSeen = false;
+		const runtimeState = {
+			byMatrixValue: null,
+			setupNodeSeen: false,
+		};
 		walkJobSteps(steps, (step) => {
-			if (
-				typeof step.uses === "string" &&
-				step.uses.startsWith("actions/setup-node@")
-			) {
+			if (isString(step.uses) && step.uses.startsWith("actions/setup-node@")) {
 				assert(
-					!setupNodeSeen,
+					!runtimeState.setupNodeSeen,
 					`Workflow job ${jobId} has multiple setup-node steps`,
 				);
-				runtimeByMatrixValue = setupNodeRuntimeByMatrix(
+				runtimeState.byMatrixValue = setupNodeRuntimeByMatrix(
 					step,
 					rootDir,
 					versions,
 				);
-				setupNodeSeen = true;
+				runtimeState.setupNodeSeen = true;
 				return;
 			}
-			if (typeof step.run !== "string") return;
+			if (!isString(step.run)) return;
 			for (const line of step.run.split(/\r?\n/)) {
-				const command = parseNxRunCommand(line);
-				if (!command || !mappedTargets.has(command.target)) continue;
-				assert(
-					runtimeByMatrixValue,
-					`Workflow lane ${mappedTargets.get(command.target)} must follow an unconditional setup-node step in job ${jobId}`,
-				);
-				const rawStepCondition = step.if ?? null;
-				const stepCondition = normalizeCondition(rawStepCondition);
-				const selectedByJob = matrixValuesForCondition(jobCondition, versions);
-				const selectedByStep = matrixValuesForCondition(
-					stepCondition,
-					versions,
-				);
-				const selectedValues = versions.length
-					? versions.filter(
-							(value) =>
-								selectedByJob.includes(value) && selectedByStep.includes(value),
-						)
-					: [undefined];
-				const runtimes = [
-					...new Set(
-						selectedValues.map((value) => runtimeByMatrixValue.get(value)),
-					),
-				];
-				assert(
-					runtimes.length > 0 && runtimes.every(Boolean),
-					`Workflow lane ${mappedTargets.get(command.target)} has no runtime projection`,
-				);
-				const entry = {
-					lane: mappedTargets.get(command.target),
-					job: jobId,
-					runtimes,
-					condition: effectiveCondition(jobCondition, stepCondition),
-					jobCondition,
-					stepCondition,
-				};
-				if (includeCommands) {
-					entry.target = command.target;
-					entry.args = command.args;
-					entry.command = command.command;
-					entry.step = step.name ?? null;
+				for (const command of parseNxRunCommands(line)) {
+					if (!mappedTargets.has(command.target)) continue;
+					if (rejectContinueOnError) {
+						const continueOnError = step["continue-on-error"];
+						assert(
+							continueOnError === undefined ||
+								continueOnError === false ||
+								continueOnError === "false",
+							`Workflow lane ${mappedTargets.get(command.target)} must not use continue-on-error`,
+						);
+					}
+					assert(
+						runtimeState.byMatrixValue,
+						`Workflow lane ${mappedTargets.get(command.target)} must follow an unconditional setup-node step in job ${jobId}`,
+					);
+					const rawStepCondition = step.if ?? null;
+					const stepCondition = normalizeCondition(rawStepCondition);
+					const selectedByJob = matrixValuesForCondition(
+						jobCondition,
+						versions,
+					);
+					const selectedByStep = matrixValuesForCondition(
+						stepCondition,
+						versions,
+					);
+					const selectedValues = versions.length
+						? versions.filter(
+								(value) =>
+									selectedByJob.includes(value) &&
+									selectedByStep.includes(value),
+							)
+						: [undefined];
+					const runtimes = [
+						...new Set(
+							selectedValues.map((value) =>
+								runtimeState.byMatrixValue.get(value),
+							),
+						),
+					];
+					assert(
+						runtimes.length > 0 && runtimes.every(Boolean),
+						`Workflow lane ${mappedTargets.get(command.target)} has no runtime projection`,
+					);
+					const entry = {
+						lane: mappedTargets.get(command.target),
+						job: jobId,
+						runtimes,
+						condition: effectiveCondition(jobCondition, stepCondition),
+						jobCondition,
+						stepCondition,
+					};
+					if (includeCommands) {
+						entry.target = command.target;
+						entry.args = command.args;
+						entry.command = command.command;
+						entry.step = step.name ?? null;
+					}
+					executions.push(entry);
 				}
-				executions.push(entry);
 			}
 		});
 	}
@@ -380,18 +448,18 @@ export function validateWorkflowAggregate(
 		expectedJobs,
 		job,
 		jobIds,
+		rejectContinueOnError = false,
 	} = {},
 ) {
 	assert(
 		lanes && Array.isArray(lanes.lanes),
 		"canonical lane model is required",
 	);
-	const selectedAggregate =
-		typeof aggregate === "string"
-			? lanes.aggregates?.[aggregate]
-			: (aggregate ?? lanes.aggregates?.[aggregateId]);
+	const selectedAggregate = isString(aggregate)
+		? lanes.aggregates?.[aggregate]
+		: (aggregate ?? lanes.aggregates?.[aggregateId]);
 	assert(
-		selectedAggregate && typeof selectedAggregate === "object",
+		selectedAggregate && isObjectLike(selectedAggregate),
 		`${label} definition is required`,
 	);
 	const memberIds = aggregateLaneIds(lanes, selectedAggregate);
@@ -399,7 +467,7 @@ export function validateWorkflowAggregate(
 	if (aggregateWorkflowRuntimes !== undefined) {
 		assert(
 			aggregateWorkflowRuntimes &&
-				typeof aggregateWorkflowRuntimes === "object" &&
+				isObjectLike(aggregateWorkflowRuntimes) &&
 				!Array.isArray(aggregateWorkflowRuntimes),
 			`${label}.workflowRuntimes must be an object`,
 		);
@@ -413,9 +481,7 @@ export function validateWorkflowAggregate(
 			assertArray(runtimes, `${label}.workflowRuntimes.${laneId}`);
 			assert(
 				runtimes.length > 0 &&
-					runtimes.every(
-						(runtime) => typeof runtime === "string" && runtime.length > 0,
-					),
+					runtimes.every((runtime) => isString(runtime) && runtime.length > 0),
 				`${label}.workflowRuntimes.${laneId} must contain runtime ids`,
 			);
 		}
@@ -437,6 +503,7 @@ export function validateWorkflowAggregate(
 		laneTargets: targets,
 		includeCommands: true,
 		jobIds,
+		rejectContinueOnError,
 	});
 	const expectedMembers = new Set(memberIds);
 	const actualRuntimes = new Map();
@@ -444,12 +511,11 @@ export function validateWorkflowAggregate(
 	const expectedJobSelection = expectedJobs ?? job;
 	for (const execution of actual) {
 		if (expectedJobSelection !== undefined) {
-			const expectedJob =
-				typeof expectedJobSelection === "string"
-					? expectedJobSelection
-					: expectedJobSelection?.[execution.lane];
+			const expectedJob = isString(expectedJobSelection)
+				? expectedJobSelection
+				: expectedJobSelection?.[execution.lane];
 			assert(
-				typeof expectedJob === "string" && expectedJob.length > 0,
+				isString(expectedJob) && expectedJob.length > 0,
 				`${label} expected job is required for lane ${execution.lane}`,
 			);
 			assert(
@@ -516,17 +582,16 @@ export function validateWorkflowProjections(
 	assert(lanes?.aggregates, "canonical lane model aggregates are required");
 	const results = {};
 	for (const [id, workflowConfig] of Object.entries(workflows)) {
-		const config =
-			typeof workflowConfig === "string"
-				? { path: workflowConfig }
-				: workflowConfig;
+		const config = isString(workflowConfig)
+			? { path: workflowConfig }
+			: workflowConfig;
 		assert(
-			config && typeof config === "object",
+			config && isObjectLike(config),
 			`${id} workflow projection configuration is required`,
 		);
 		const relativePath = config.path ?? config.file ?? config.workflow;
 		assert(
-			typeof relativePath === "string" && relativePath.length > 0,
+			isString(relativePath) && relativePath.length > 0,
 			`${id} workflow projection path is required`,
 		);
 		const aggregateId = aggregates[id] ?? config.aggregate ?? id;
@@ -542,6 +607,7 @@ export function validateWorkflowProjections(
 				(Array.isArray(config.jobs) ? undefined : config.jobs),
 			job: config.job,
 			jobIds: Array.isArray(config.jobs) ? config.jobs : undefined,
+			rejectContinueOnError: config.rejectContinueOnError ?? false,
 		});
 	}
 	return results;

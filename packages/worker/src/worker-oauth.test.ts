@@ -3,6 +3,7 @@ import type {
 	OAuthHelpers,
 } from "@cloudflare/workers-oauth-provider";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { HevyHttpError } from "@hevy-mcp/hevy-client";
 import type { HevyClient } from "@hevy-mcp/hevy-client";
 import {
@@ -10,11 +11,58 @@ import {
 	encodeAuthRequest,
 	handleAuthorizeGet,
 	handleAuthorizePost,
-	hasOAuthAccessTokenShape,
+	hasOAuthAccessTokenFormat,
 	renderAuthorizePage,
 	type HevyOAuthDependencies,
 } from "./worker-oauth.js";
 import { createWorkerFetchHandler } from "./worker.js";
+import { resetMemoryValidationCacheForTests } from "./validation-cache.js";
+
+class TestExecutionSpan implements Span {
+	get isTraced(): boolean {
+		return false;
+	}
+
+	setAttribute(_key: string, _value: boolean | number | string): this {
+		return this;
+	}
+
+	setAttributes(
+		_attributes: Record<string, boolean | number | string | undefined>,
+	): this {
+		return this;
+	}
+
+	end(): void {}
+}
+
+const testExecutionContext = {
+	waitUntil(_promise: Promise<unknown>): void {},
+	passThroughOnException(): void {},
+	abort(_reason?: string): void {},
+	exports: {},
+	props: {},
+	tracing: {
+		enterSpan<T, A extends unknown[]>(
+			_name: string,
+			callback: (span: Span, ...args: A) => T,
+			...args: A
+		): T {
+			return callback(new TestExecutionSpan(), ...args);
+		},
+		startActiveSpan<T, A extends unknown[]>(
+			_name: string,
+			callback: (span: Span, ...args: A) => T,
+			...args: A
+		): T {
+			return callback(new TestExecutionSpan(), ...args);
+		},
+		startSpan(_name: string): Span {
+			return new TestExecutionSpan();
+		},
+		Span: TestExecutionSpan,
+	},
+} satisfies ExecutionContext;
 
 beforeEach(() => {
 	vi.stubGlobal("Cloudflare", {
@@ -25,7 +73,18 @@ beforeEach(() => {
 afterEach(() => {
 	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
+	resetMemoryValidationCacheForTests();
 });
+
+const stringSchema = z.string();
+type MemoryGetOptions = { readonly type?: string };
+type TestOAuthEnv = typeof testExecutionContext;
+
+function isString(
+	value: string | MemoryGetOptions | undefined,
+): value is string {
+	return stringSchema.safeParse(value).success;
+}
 
 function createMockClient(overrides: Partial<HevyClient> = {}): HevyClient {
 	return {
@@ -67,8 +126,8 @@ function createFakeHelpers(overrides: Partial<FakeHelpers> = {}): OAuthHelpers {
 }
 
 function createDependencies(
-	overrides: Partial<HevyOAuthDependencies<object>> = {},
-): HevyOAuthDependencies<object> {
+	overrides: Partial<HevyOAuthDependencies<TestOAuthEnv>> = {},
+): HevyOAuthDependencies<TestOAuthEnv> {
 	return {
 		validateApiKey: vi.fn().mockResolvedValue("valid"),
 		serveMcp: vi.fn().mockResolvedValue(new Response("ok")),
@@ -96,7 +155,7 @@ describe("OAuth helpers", () => {
 		["a:b:c:d", false],
 		["::secret", false],
 	])("classifies bearer value %j as OAuth token: %j", (token, expected) => {
-		expect(hasOAuthAccessTokenShape(token)).toBe(expected);
+		expect(hasOAuthAccessTokenFormat(token)).toBe(expected);
 	});
 
 	it("round-trips an auth request through encode/decode", () => {
@@ -200,7 +259,7 @@ describe("authorize endpoint", () => {
 				oauth_request: encodeAuthRequest(sampleAuthRequest),
 				hevy_api_key: "some-key",
 			}),
-			{},
+			testExecutionContext,
 			createFakeHelpers({
 				completeAuthorization: vi
 					.fn()
@@ -239,7 +298,7 @@ describe("authorize endpoint", () => {
 				oauth_request: encodeAuthRequest(sampleAuthRequest),
 				hevy_api_key: " secret-key ",
 			}),
-			{},
+			testExecutionContext,
 			createFakeHelpers({ completeAuthorization }),
 			createDependencies({ validateApiKey }),
 		);
@@ -248,7 +307,7 @@ describe("authorize endpoint", () => {
 		expect(result.headers.get("location")).toContain("code=abc");
 		expect(validateApiKey).toHaveBeenCalledWith(
 			"secret-key",
-			{},
+			testExecutionContext,
 			expect.any(AbortSignal),
 			expect.any(Number),
 		);
@@ -268,7 +327,7 @@ describe("authorize endpoint", () => {
 				oauth_request: encodeAuthRequest(sampleAuthRequest),
 				hevy_api_key: "bad-key",
 			}),
-			{},
+			testExecutionContext,
 			createFakeHelpers({ completeAuthorization }),
 			createDependencies({
 				validateApiKey: vi.fn().mockResolvedValue("invalid"),
@@ -285,7 +344,7 @@ describe("authorize endpoint", () => {
 				oauth_request: encodeAuthRequest(sampleAuthRequest),
 				hevy_api_key: "some-key",
 			}),
-			{},
+			testExecutionContext,
 			createFakeHelpers(),
 			createDependencies({
 				validateApiKey: vi.fn().mockRejectedValue(new Error("upstream outage")),
@@ -305,7 +364,7 @@ describe("authorize endpoint", () => {
 				oauth_request: encodeAuthRequest(sampleAuthRequest),
 				hevy_api_key: "some-key",
 			}),
-			{},
+			testExecutionContext,
 			createFakeHelpers(),
 			createDependencies({
 				validateApiKey: vi.fn().mockResolvedValue("config-error"),
@@ -324,7 +383,7 @@ describe("authorize endpoint", () => {
 				oauth_request: "tampered",
 				hevy_api_key: "some-key",
 			}),
-			{},
+			testExecutionContext,
 			createFakeHelpers({ completeAuthorization }),
 			createDependencies(),
 		);
@@ -339,7 +398,7 @@ describe("authorize endpoint", () => {
 				oauth_request: encodeAuthRequest(sampleAuthRequest),
 				hevy_api_key: "   ",
 			}),
-			{},
+			testExecutionContext,
 			createFakeHelpers(),
 			createDependencies({ validateApiKey }),
 		);
@@ -350,7 +409,7 @@ describe("authorize endpoint", () => {
 	it("projects an aborted OAuth validation as cancellation", async () => {
 		const controller = new AbortController();
 		const validateApiKey = vi.fn(
-			(_apiKey: string, _env: object, signal?: AbortSignal) =>
+			(_apiKey: string, _env: TestOAuthEnv, signal?: AbortSignal) =>
 				new Promise<"valid">((_resolve, reject) => {
 					signal?.addEventListener(
 						"abort",
@@ -367,7 +426,7 @@ describe("authorize endpoint", () => {
 				},
 				controller.signal,
 			),
-			{},
+			testExecutionContext,
 			createFakeHelpers(),
 			createDependencies({ validateApiKey }),
 		);
@@ -385,7 +444,7 @@ describe("authorize endpoint", () => {
 				oauth_request: encodeAuthRequest(sampleAuthRequest),
 				hevy_api_key: "some-key",
 			}),
-			{},
+			testExecutionContext,
 			createFakeHelpers(),
 			createDependencies({
 				validateApiKey: vi.fn().mockRejectedValue(
@@ -417,26 +476,35 @@ function createMemoryKV() {
 	const store = new Map<string, MemoryKVEntry>();
 	return {
 		store,
-		async get(key: string, options?: { type?: string } | string) {
+		get(key: string, options?: MemoryGetOptions | string) {
 			const entry = store.get(key);
-			if (!entry) return null;
-			const type = typeof options === "string" ? options : options?.type;
-			return type === "json" ? JSON.parse(entry.value) : entry.value;
+			if (!entry) return Promise.resolve(null);
+			const type = isString(options) ? options : options?.type;
+			if (type === "json") {
+				try {
+					return Promise.resolve(JSON.parse(entry.value));
+				} catch (error) {
+					return Promise.reject(error);
+				}
+			}
+			return Promise.resolve(entry.value);
 		},
-		async put(key: string, value: string) {
+		put(key: string, value: string) {
 			store.set(key, { value });
+			return Promise.resolve();
 		},
-		async delete(key: string) {
+		delete(key: string) {
 			store.delete(key);
+			return Promise.resolve();
 		},
-		async list(options?: { prefix?: string }) {
+		list(options?: { prefix?: string }) {
 			const prefix = options?.prefix ?? "";
-			return {
+			return Promise.resolve({
 				keys: [...store.keys()]
 					.filter((name) => name.startsWith(prefix))
 					.map((name) => ({ name })),
 				list_complete: true,
-			};
+			});
 		},
 	};
 }
@@ -461,7 +529,7 @@ const initializeBody = {
 	},
 };
 
-async function parseMcpResponse(response: Response) {
+async function parseMcpResponse(response: Response): Promise<unknown> {
 	const text = await response.text();
 	if (response.headers.get("content-type")?.includes("text/event-stream")) {
 		const data = text
@@ -469,9 +537,9 @@ async function parseMcpResponse(response: Response) {
 			.find((line) => line.startsWith("data: "))
 			?.slice(6);
 		if (!data) throw new Error(`Missing SSE data: ${text}`);
-		return JSON.parse(data) as Record<string, unknown>;
+		return JSON.parse(data);
 	}
-	return JSON.parse(text) as Record<string, unknown>;
+	return JSON.parse(text);
 }
 
 describe("OAuth-enabled Worker fetch handler", () => {
@@ -496,31 +564,29 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				"https://worker.example/.well-known/oauth-authorization-server",
 			),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(authServer.status).toBe(200);
-		const metadata = (await authServer.json()) as Record<string, unknown>;
-		expect(metadata.authorization_endpoint).toBe(
-			"https://worker.example/authorize",
-		);
-		expect(metadata.token_endpoint).toBe("https://worker.example/token");
-		expect(metadata.registration_endpoint).toBe(
-			"https://worker.example/register",
-		);
-		expect(metadata.scopes_supported).toEqual(["mcp"]);
-		expect(metadata.client_id_metadata_document_supported).toBe(true);
-		expect(metadata.code_challenge_methods_supported).toEqual(["S256"]);
+		expect(await authServer.json()).toMatchObject({
+			authorization_endpoint: "https://worker.example/authorize",
+			token_endpoint: "https://worker.example/token",
+			registration_endpoint: "https://worker.example/register",
+			scopes_supported: ["mcp"],
+			client_id_metadata_document_supported: true,
+			code_challenge_methods_supported: ["S256"],
+		});
 
 		const resource = await handler(
 			new Request(
 				"https://worker.example/.well-known/oauth-protected-resource/mcp",
 			),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(resource.status).toBe(200);
-		const resourceMetadata = (await resource.json()) as Record<string, unknown>;
-		expect(resourceMetadata.resource).toBe("https://worker.example/mcp");
+		expect(await resource.json()).toMatchObject({
+			resource: "https://worker.example/mcp",
+		});
 	});
 
 	it("keeps discovery paths returning 404 without OAUTH_KV", async () => {
@@ -530,7 +596,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				"https://worker.example/.well-known/oauth-authorization-server",
 			),
 			{},
-			{},
+			testExecutionContext,
 		);
 		expect(result.status).toBe(404);
 	});
@@ -545,7 +611,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				"https://worker.example/.well-known/oauth-authorization-server",
 			),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(discovery.status).toBe(404);
 
@@ -560,7 +626,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				body: JSON.stringify(initializeBody),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(legacy.status).toBe(200);
 		expect(JSON.stringify(stderrSpy.mock.calls)).toContain(
@@ -578,7 +644,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				body: "{}",
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(result.status).toBe(401);
 		expect(result.headers.get("www-authenticate")).toContain(
@@ -602,7 +668,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				body: JSON.stringify(initializeBody),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(result.status).toBe(200);
 		expect(createValidationClient).toHaveBeenCalledTimes(1);
@@ -614,7 +680,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		const preflight = await handler(
 			new Request("https://worker.example/mcp", { method: "OPTIONS" }),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(preflight.status).toBe(204);
 		expect(preflight.headers.get("access-control-allow-methods")).toBe(
@@ -624,7 +690,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		const get = await handler(
 			new Request("https://worker.example/mcp", { method: "GET" }),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(get.status).toBe(401);
 		expect(get.headers.get("www-authenticate")).toContain(
@@ -644,7 +710,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				body: "{}",
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(result.status).toBe(401);
 		expect(result.headers.get("access-control-allow-origin")).toBe(
@@ -670,7 +736,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				}),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 
 		expect(result.status).toBe(201);
@@ -702,7 +768,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				}),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 
 		expect(result.status).toBe(201);
@@ -726,7 +792,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				}),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 
 		expect(result.status).toBe(403);
@@ -749,7 +815,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				}),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(registration.status).toBe(201);
 		const client = (await registration.json()) as { client_id: string };
@@ -774,7 +840,11 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		authorizeUrl.searchParams.set("state", "state-123");
 		authorizeUrl.searchParams.set("code_challenge", challenge);
 		authorizeUrl.searchParams.set("code_challenge_method", "S256");
-		const consent = await handler(new Request(authorizeUrl), env, {});
+		const consent = await handler(
+			new Request(authorizeUrl),
+			env,
+			testExecutionContext,
+		);
 		expect(consent.status).toBe(200);
 		const consentHtml = await consent.text();
 		const encodedRequest = /name="oauth_request" value="([^"]+)"/.exec(
@@ -793,7 +863,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				}),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(approval.status).toBe(302);
 		const redirect = new URL(approval.headers.get("location") as string);
@@ -815,7 +885,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				}),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(tokenResult.status).toBe(200);
 		const tokens = (await tokenResult.json()) as {
@@ -824,7 +894,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 			token_type: string;
 		};
 		expect(tokens.token_type.toLowerCase()).toBe("bearer");
-		expect(hasOAuthAccessTokenShape(tokens.access_token)).toBe(true);
+		expect(hasOAuthAccessTokenFormat(tokens.access_token)).toBe(true);
 		expect(tokens.access_token).not.toContain("users-hevy-api-key");
 		expect(tokens.refresh_token).toBeTruthy();
 
@@ -851,7 +921,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				body: JSON.stringify(initializeBody),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(mcpResult.status).toBe(200);
 		expect(await parseMcpResponse(mcpResult)).toMatchObject({ id: 1 });
@@ -869,7 +939,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				}),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(refreshResult.status).toBe(200);
 		const refreshed = (await refreshResult.json()) as {
@@ -886,7 +956,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				body: JSON.stringify(initializeBody),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(refreshedMcpResult.status).toBe(200);
 		expect(requestClients).toEqual([
@@ -905,9 +975,73 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				body: JSON.stringify(initializeBody),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(rejected.status).toBe(401);
+	});
+
+	it("accepts Claude's published CIMD metadata with an optional JWT grant", async () => {
+		const clientId = "https://claude.ai/oauth/mcp-oauth-client-metadata";
+		const metadata = {
+			client_id: clientId,
+			client_name: "Claude",
+			client_uri: "https://claude.ai",
+			redirect_uris: [redirectUri],
+			grant_types: [
+				"authorization_code",
+				"refresh_token",
+				"urn:ietf:params:oauth:grant-type:jwt-bearer",
+			],
+			response_types: ["code"],
+			token_endpoint_auth_method: "none",
+		};
+		const fetchMock = vi.fn((_input: RequestInfo | URL) =>
+			Promise.resolve(Response.json(metadata)),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		const { handler, env } = createHandlerWithEnv();
+		const verifier = base64UrlEncode(
+			crypto.getRandomValues(new Uint8Array(32)),
+		);
+		const challenge = base64UrlEncode(
+			new Uint8Array(
+				await crypto.subtle.digest(
+					"SHA-256",
+					new TextEncoder().encode(verifier),
+				),
+			),
+		);
+		const authorizeUrl = new URL("https://worker.example/authorize");
+		authorizeUrl.searchParams.set("response_type", "code");
+		authorizeUrl.searchParams.set("client_id", clientId);
+		authorizeUrl.searchParams.set("redirect_uri", redirectUri);
+		authorizeUrl.searchParams.set("code_challenge", challenge);
+		authorizeUrl.searchParams.set("code_challenge_method", "S256");
+		authorizeUrl.searchParams.set("state", "claude-state");
+		authorizeUrl.searchParams.set("scope", "mcp");
+		authorizeUrl.searchParams.set("resource", "https://worker.example/mcp");
+
+		const result = await handler(
+			new Request(authorizeUrl),
+			env,
+			testExecutionContext,
+		);
+
+		// Regression coverage for issue #942: provider 0.10.0 rejected
+		// Claude's optional JWT grant; 0.10.2 negotiates it away and renders
+		// the consent page.
+		expect(result.status).toBe(200);
+		expect(await result.text()).toContain("Claude");
+		expect(fetchMock).toHaveBeenCalled();
+		for (const [input] of fetchMock.mock.calls) {
+			const requestedUrl =
+				input instanceof Request
+					? input.url
+					: input instanceof URL
+						? input.href
+						: input;
+			expect(requestedUrl).toBe(clientId);
+		}
 	});
 
 	it("completes the CIMD OAuth flow and serves MCP requests", async () => {
@@ -919,7 +1053,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 			redirect_uris: [cimdRedirectUri],
 			token_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
 		};
-		const fetchMock = vi.fn(async () => Response.json(metadata));
+		const fetchMock = vi.fn(() => Promise.resolve(Response.json(metadata)));
 		vi.stubGlobal("fetch", fetchMock);
 		const { handler, env } = createHandlerWithEnv();
 
@@ -944,7 +1078,11 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		authorizeUrl.searchParams.set("code_challenge_method", "S256");
 		authorizeUrl.searchParams.set("resource", resource);
 
-		const consent = await handler(new Request(authorizeUrl), env, {});
+		const consent = await handler(
+			new Request(authorizeUrl),
+			env,
+			testExecutionContext,
+		);
 		expect(consent.status).toBe(200);
 		const consentHtml = await consent.text();
 		expect(consentHtml).toContain("ChatGPT");
@@ -963,7 +1101,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				}),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(approval.status).toBe(302);
 		const redirect = new URL(approval.headers.get("location") as string);
@@ -985,7 +1123,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				}),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(tokenResult.status).toBe(200);
 		const tokens = (await tokenResult.json()) as {
@@ -993,7 +1131,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 			token_type: string;
 		};
 		expect(tokens.token_type.toLowerCase()).toBe("bearer");
-		expect(hasOAuthAccessTokenShape(tokens.access_token)).toBe(true);
+		expect(hasOAuthAccessTokenFormat(tokens.access_token)).toBe(true);
 		expect(
 			[...env.OAUTH_KV.store.keys()].some((key) => key.startsWith("client:")),
 		).toBe(false);
@@ -1016,7 +1154,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				body: JSON.stringify(initializeBody),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(mcpResult.status).toBe(200);
 		expect(await parseMcpResponse(mcpResult)).toMatchObject({ id: 1 });
@@ -1046,7 +1184,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		const redirectUri = "https://chatgpt.com/connector/oauth/test-callback";
 		vi.stubGlobal(
 			"fetch",
-			vi.fn(async () => Response.json(metadata)),
+			vi.fn(() => Promise.resolve(Response.json(metadata))),
 		);
 		const { handler, env } = createHandlerWithEnv();
 		const authorizeUrl = new URL("https://worker.example/authorize");
@@ -1057,7 +1195,11 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		authorizeUrl.searchParams.set("code_challenge", "challenge");
 		authorizeUrl.searchParams.set("code_challenge_method", "S256");
 
-		const result = await handler(new Request(authorizeUrl), env, {});
+		const result = await handler(
+			new Request(authorizeUrl),
+			env,
+			testExecutionContext,
+		);
 		expect(result.status).toBe(400);
 		expect(await result.text()).toContain("Invalid authorization request.");
 		const keyNames = [...env.OAUTH_KV.store.keys()];
@@ -1094,7 +1236,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				}),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		const client = (await registration.json()) as { client_id: string };
 		const verifier = base64UrlEncode(
@@ -1116,7 +1258,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		authorizeUrl.searchParams.set("code_challenge", challenge);
 		authorizeUrl.searchParams.set("code_challenge_method", "S256");
 		const consentHtml = await (
-			await handler(new Request(authorizeUrl), env, {})
+			await handler(new Request(authorizeUrl), env, testExecutionContext)
 		).text();
 		const encodedRequest = /name="oauth_request" value="([^"]+)"/.exec(
 			consentHtml,
@@ -1130,7 +1272,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				}),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		const code = new URL(
 			approval.headers.get("location") as string,
@@ -1148,11 +1290,16 @@ describe("OAuth-enabled Worker fetch handler", () => {
 					}),
 				}),
 				env,
-				{},
+				testExecutionContext,
 			)
 		).json()) as { access_token: string };
 
-		// The key gets revoked in Hevy after the grant was issued.
+		// The key gets revoked in Hevy after the grant was issued. Clear the
+		// validation cache entry the approval step above just wrote, so this
+		// request re-checks Hevy instead of reusing that now-stale "valid" verdict.
+		for (const key of [...env.OAUTH_KV.store.keys()]) {
+			if (key.startsWith("keyvalid:")) env.OAUTH_KV.store.delete(key);
+		}
 		validationFactory = revokedValidation;
 		const result = await handler(
 			new Request("https://worker.example/mcp", {
@@ -1164,11 +1311,127 @@ describe("OAuth-enabled Worker fetch handler", () => {
 				body: JSON.stringify(initializeBody),
 			}),
 			env,
-			{},
+			testExecutionContext,
 		);
 		expect(result.status).toBe(401);
 		expect(result.headers.get("www-authenticate")).toContain(
 			'error="invalid_token"',
 		);
+	});
+
+	it("logs the upstream status when key validation throws for an authorized MCP request", async () => {
+		const validValidation = vi.fn(() => createMockClient());
+		const throwingValidation = vi.fn(() =>
+			createMockClient({
+				getUserInfo: vi.fn().mockRejectedValue(
+					new HevyHttpError("HTTP 503", {
+						status: 503,
+						method: "GET",
+						endpoint: "/v1/user/info",
+						code: "HEVY_RETRY_EXHAUSTED",
+					}),
+				),
+			}),
+		);
+		let validationFactory = validValidation;
+		const { handler, env } = createHandlerWithEnv({
+			createValidationClient: () => validationFactory(),
+		});
+
+		const registration = await handler(
+			new Request("https://worker.example/register", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					redirect_uris: [redirectUri],
+					token_endpoint_auth_method: "none",
+				}),
+			}),
+			env,
+			testExecutionContext,
+		);
+		const client = (await registration.json()) as { client_id: string };
+		const verifier = base64UrlEncode(
+			crypto.getRandomValues(new Uint8Array(32)),
+		);
+		const challenge = base64UrlEncode(
+			new Uint8Array(
+				await crypto.subtle.digest(
+					"SHA-256",
+					new TextEncoder().encode(verifier),
+				),
+			),
+		);
+		const authorizeUrl = new URL("https://worker.example/authorize");
+		authorizeUrl.searchParams.set("response_type", "code");
+		authorizeUrl.searchParams.set("client_id", client.client_id);
+		authorizeUrl.searchParams.set("redirect_uri", redirectUri);
+		authorizeUrl.searchParams.set("state", "s");
+		authorizeUrl.searchParams.set("code_challenge", challenge);
+		authorizeUrl.searchParams.set("code_challenge_method", "S256");
+		const consentHtml = await (
+			await handler(new Request(authorizeUrl), env, testExecutionContext)
+		).text();
+		const encodedRequest = /name="oauth_request" value="([^"]+)"/.exec(
+			consentHtml,
+		)?.[1] as string;
+		const approval = await handler(
+			new Request("https://worker.example/authorize", {
+				method: "POST",
+				body: new URLSearchParams({
+					oauth_request: encodedRequest,
+					hevy_api_key: "flaky-connection-key",
+				}),
+			}),
+			env,
+			testExecutionContext,
+		);
+		const code = new URL(
+			approval.headers.get("location") as string,
+		).searchParams.get("code") as string;
+		const tokens = (await (
+			await handler(
+				new Request("https://worker.example/token", {
+					method: "POST",
+					body: new URLSearchParams({
+						grant_type: "authorization_code",
+						code,
+						redirect_uri: redirectUri,
+						client_id: client.client_id,
+						code_verifier: verifier,
+					}),
+				}),
+				env,
+				testExecutionContext,
+			)
+		).json()) as { access_token: string };
+
+		// Force a live validation call: the approval step above already cached
+		// this key as valid, which would otherwise mask the throw below.
+		for (const key of [...env.OAUTH_KV.store.keys()]) {
+			if (key.startsWith("keyvalid:")) env.OAUTH_KV.store.delete(key);
+		}
+		validationFactory = throwingValidation;
+		const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const result = await handler(
+			new Request("https://worker.example/mcp", {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					authorization: `Bearer ${tokens.access_token}`,
+				},
+				body: JSON.stringify(initializeBody),
+			}),
+			env,
+			testExecutionContext,
+		);
+
+		expect(result.status).toBe(502);
+		const diagnostic = JSON.stringify(stderrSpy.mock.calls);
+		expect(diagnostic).toContain("oauth-mcp-validation");
+		expect(diagnostic).toContain("HevyHttpError");
+		expect(diagnostic).toContain("503");
+		expect(diagnostic).toContain("HEVY_RETRY_EXHAUSTED");
+		stderrSpy.mockRestore();
 	});
 });

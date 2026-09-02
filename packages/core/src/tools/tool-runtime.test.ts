@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import type { HevyClient } from "@hevy-mcp/hevy-client";
+import { createMockHevyClient } from "../../test-fixtures/mock-hevy.js";
 import { createToolRuntime } from "./tool-runtime.js";
 
 const runImmediately = <T>(operation: () => Promise<T>): Promise<T> =>
 	operation();
 
 const catalog = {
-	get: async () => [],
+	get: () => Promise.resolve([]),
 	reset: () => undefined,
 };
 
@@ -26,9 +26,9 @@ describe("createToolRuntime observation scope", () => {
 				}),
 			},
 		});
-		const handler = runtime.createHandler(async () => {
+		const handler = runtime.createHandler(() => {
 			executions += 1;
-			return { content: [{ type: "text", text: "ok" }] };
+			return Promise.resolve({ content: [{ type: "text", text: "ok" }] });
 		}, "create-workout");
 
 		await expect(handler({ id: "workout-id" })).resolves.toMatchObject({
@@ -40,9 +40,11 @@ describe("createToolRuntime observation scope", () => {
 
 	it("starts the handler lazily inside the active observer scope", async () => {
 		let active = false;
-		const handler = vi.fn(async () => {
+		const handler = vi.fn(() => {
 			expect(active).toBe(true);
-			return { content: [{ type: "text" as const, text: "ok" }] };
+			return Promise.resolve({
+				content: [{ type: "text" as const, text: "ok" }],
+			});
 		});
 		let runCalls = 0;
 		const run = async <T>(operation: () => Promise<T>): Promise<T> => {
@@ -101,7 +103,7 @@ describe("createToolRuntime observation scope", () => {
 		});
 		const secret = "private-routine-title-sentinel";
 		const handler = runtime.createHandler(
-			async () => ({ content: [] }),
+			() => Promise.resolve({ content: [] }),
 			"list-routines",
 			{ feature: "routines", kind: "read", operation: "list" },
 		);
@@ -154,7 +156,10 @@ describe("createToolRuntime observation scope", () => {
 			text: `result-${index}`,
 		}));
 
-		await runtime.createHandler(async () => ({ content }), "list-workouts")({});
+		await runtime.createHandler(
+			() => Promise.resolve({ content }),
+			"list-workouts",
+		)({});
 
 		expect(finish).toHaveBeenCalledWith(
 			expect.objectContaining({
@@ -181,9 +186,10 @@ describe("createToolRuntime observation scope", () => {
 		});
 		const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
 
-		const result = await runtime.createHandler(async () => {
-			throw new Error(secret);
-		}, "get-workouts")({});
+		const result = await runtime.createHandler(
+			() => Promise.reject(new Error(secret)),
+			"get-workouts",
+		)({});
 
 		expect(result).toMatchObject({ isError: true });
 		expect(finish).toHaveBeenCalledWith(
@@ -198,8 +204,10 @@ describe("createToolRuntime observation scope", () => {
 	});
 
 	it("lets the newest nested execution scope control the client", async () => {
-		const getUserInfo = vi.fn().mockResolvedValue({ data: { id: "user" } });
-		const client = { getUserInfo } as unknown as HevyClient;
+		const client = createMockHevyClient();
+		const getUserInfo = client.getUserInfo.mockResolvedValue({
+			data: { id: "user" },
+		});
 		const runtime = createToolRuntime({ client, catalog });
 		const firstSignal = new AbortController().signal;
 		const secondSignal = new AbortController().signal;
@@ -219,5 +227,43 @@ describe("createToolRuntime observation scope", () => {
 			signal: secondSignal,
 			deadline: 222,
 		});
+	});
+
+	it("cleans up fallback listeners across repeated execution scopes", () => {
+		const nativeDescriptor = Object.getOwnPropertyDescriptor(
+			AbortSignal,
+			"any",
+		);
+		Object.defineProperty(AbortSignal, "any", {
+			value: undefined,
+			configurable: true,
+		});
+		try {
+			const lifecycle = new AbortController();
+			const removeEventListener = vi.spyOn(
+				lifecycle.signal,
+				"removeEventListener",
+			);
+			const runtime = createToolRuntime({
+				client: null,
+				catalog,
+				lifecycleSignal: lifecycle.signal,
+			});
+
+			for (let index = 0; index < 3; index += 1) {
+				const request = new AbortController();
+				const scoped = runtime.forExecution({ signal: request.signal });
+				request.abort();
+				expect(scoped.execution?.signal?.aborted).toBe(true);
+			}
+
+			expect(removeEventListener).toHaveBeenCalledTimes(3);
+		} finally {
+			if (nativeDescriptor) {
+				Object.defineProperty(AbortSignal, "any", nativeDescriptor);
+			} else {
+				Reflect.deleteProperty(AbortSignal, "any");
+			}
+		}
 	});
 });

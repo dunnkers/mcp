@@ -1,17 +1,34 @@
 import { request, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { McpServer } from "@modelcontextprotocol/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { startStreamableHttpServer } from "./streamable-http.js";
+import { z } from "zod";
+import {
+	resolveHttpAdmissionConfig,
+	startStreamableHttpServer,
+} from "./streamable-http.js";
 
-const createMcpServer = async () => {
+const createMcpServer = () => {
 	const server = new McpServer({ name: "test-server", version: "1.0.0" });
-	server.registerTool(
-		"mock-tool",
-		{ description: "A mocked tool" },
-		async () => ({ content: [{ type: "text", text: "mock result" }] }),
+	server.registerTool("mock-tool", { description: "A mocked tool" }, () =>
+		Promise.resolve({ content: [{ type: "text", text: "mock result" }] }),
 	);
-	return server;
+	return Promise.resolve(server);
 };
+
+const stringSchema = z.string();
+type HttpJsonValue =
+	| string
+	| number
+	| boolean
+	| null
+	| HttpJsonObject
+	| HttpJsonValue[];
+type HttpJsonObject = { readonly [key: string]: HttpJsonValue };
+
+function isString(value: string | AddressInfo | null): value is string {
+	return stringSchema.safeParse(value).success;
+}
 
 const handles: Array<{ close(): Promise<void> }> = [];
 
@@ -23,6 +40,10 @@ interface HttpResult {
 	statusCode?: number;
 	headers: Record<string, string | string[] | undefined>;
 	body: string;
+}
+
+interface HttpRequestHeaders {
+	[key: string]: string;
 }
 
 function openStream(
@@ -54,22 +75,23 @@ function openStream(
 function call(
 	port: number,
 	method: string,
-	body?: unknown,
+	body?: HttpJsonObject | string,
 	extraHeaders: Record<string, string> = {},
 ): Promise<HttpResult> {
 	return new Promise((resolve, reject) => {
 		const payload = body === undefined ? undefined : JSON.stringify(body);
+		const headers: HttpRequestHeaders = {
+			Accept: "application/json, text/event-stream",
+			...extraHeaders,
+		};
+		if (payload) headers["Content-Type"] = "application/json";
 		const client = request(
 			{
 				host: "127.0.0.1",
 				port,
 				path: "/mcp",
 				method,
-				headers: {
-					Accept: "application/json, text/event-stream",
-					...(payload ? { "Content-Type": "application/json" } : {}),
-					...extraHeaders,
-				},
+				headers,
 			},
 			(response) => {
 				const chunks: Buffer[] = [];
@@ -91,11 +113,11 @@ function call(
 
 function serverPort(handle: { server: Server }): number {
 	const address = handle.server.address();
-	if (!address || typeof address === "string") throw new Error("No address");
+	if (!address || isString(address)) throw new Error("No address");
 	return address.port;
 }
 
-function jsonBody(result: HttpResult): Record<string, unknown> {
+function jsonBody(result: HttpResult): unknown {
 	const json = result.body.startsWith("event:")
 		? result.body
 				.split("\n")
@@ -104,7 +126,7 @@ function jsonBody(result: HttpResult): Record<string, unknown> {
 				.join("\n")
 		: result.body;
 	if (!json) throw new Error(`empty response: ${JSON.stringify(result)}`);
-	return JSON.parse(json) as Record<string, unknown>;
+	return JSON.parse(json);
 }
 
 async function startTestServer(host = "127.0.0.1") {
@@ -126,7 +148,7 @@ async function startDisconnectTestServer() {
 	const toolRelease = new Promise<void>((resolve) => {
 		releaseTool = resolve;
 	});
-	const createHangingServer = async () => {
+	const createHangingServer = () => {
 		const server = new McpServer({ name: "test-server", version: "1.0.0" });
 		server.registerTool(
 			"mock-tool",
@@ -137,7 +159,7 @@ async function startDisconnectTestServer() {
 				return { content: [{ type: "text", text: "mock result" }] };
 			},
 		);
-		return server;
+		return Promise.resolve(server);
 	};
 	const started = await startStreamableHttpServer(
 		{ transport: "http", host: "127.0.0.1", port: 0 },
@@ -167,12 +189,177 @@ async function initialize(port: number, headers: Record<string, string> = {}) {
 }
 
 describe("Streamable HTTP server", () => {
+	it("uses safe admission defaults and bounded environment overrides", () => {
+		expect(resolveHttpAdmissionConfig()).toEqual({
+			maxSessions: 100,
+			maxInitializing: 10,
+			idleTimeoutMs: 1_800_000,
+			bodyTimeoutMs: 30_000,
+		});
+		process.env.HEVY_MCP_HTTP_MAX_SESSIONS = "7";
+		process.env.HEVY_MCP_HTTP_MAX_INITIALIZING = "0";
+		process.env.HEVY_MCP_HTTP_IDLE_TIMEOUT_MS = "999999999999";
+		process.env.HEVY_MCP_HTTP_BODY_TIMEOUT_MS = "not-a-number";
+		try {
+			expect(resolveHttpAdmissionConfig()).toEqual({
+				maxSessions: 7,
+				maxInitializing: 10,
+				idleTimeoutMs: 86_400_000,
+				bodyTimeoutMs: 30_000,
+			});
+			expect(
+				resolveHttpAdmissionConfig({
+					maxSessions: 2,
+					maxInitializing: 3,
+					idleTimeoutMs: 4,
+					bodyTimeoutMs: 5,
+				}),
+			).toEqual({
+				maxSessions: 2,
+				maxInitializing: 3,
+				idleTimeoutMs: 4,
+				bodyTimeoutMs: 5,
+			});
+			expect(
+				resolveHttpAdmissionConfig({
+					maxSessions: 0.5,
+					maxInitializing: 0.5,
+					idleTimeoutMs: 0.5,
+					bodyTimeoutMs: 0.5,
+				}),
+			).toEqual({
+				maxSessions: 100,
+				maxInitializing: 10,
+				idleTimeoutMs: 1_800_000,
+				bodyTimeoutMs: 30_000,
+			});
+		} finally {
+			delete process.env.HEVY_MCP_HTTP_MAX_SESSIONS;
+			delete process.env.HEVY_MCP_HTTP_MAX_INITIALIZING;
+			delete process.env.HEVY_MCP_HTTP_IDLE_TIMEOUT_MS;
+			delete process.env.HEVY_MCP_HTTP_BODY_TIMEOUT_MS;
+		}
+	});
+
+	it("returns 429 at established-session capacity", async () => {
+		const first = await startStreamableHttpServer(
+			{ transport: "http", host: "127.0.0.1", port: 0 },
+			"test-key",
+			createMcpServer,
+			{ maxSessions: 1 },
+		);
+		handles.push(first);
+		const firstInitialized = await initialize(serverPort(first));
+		expect(firstInitialized.statusCode).toBe(200);
+		expect((await initialize(serverPort(first))).statusCode).toBe(429);
+	});
+
+	it("returns 503 while initialization capacity is occupied and aborts it on shutdown", async () => {
+		let started!: () => void;
+		let signal: AbortSignal | undefined;
+		const startedPromise = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const createHangingServer = ({
+			lifecycleSignal,
+		}: {
+			lifecycleSignal?: AbortSignal;
+		}) => {
+			signal = lifecycleSignal;
+			started();
+			return new Promise<Awaited<ReturnType<typeof createMcpServer>>>(
+				(resolve) => {
+					lifecycleSignal?.addEventListener(
+						"abort",
+						async () => resolve(await createMcpServer()),
+						{ once: true },
+					);
+				},
+			);
+		};
+		const handle = await startStreamableHttpServer(
+			{ transport: "http", host: "127.0.0.1", port: 0 },
+			"test-key",
+			createHangingServer,
+			{ maxInitializing: 1 },
+		);
+		handles.push(handle);
+		const first = initialize(serverPort(handle));
+		await startedPromise;
+		expect((await initialize(serverPort(handle))).statusCode).toBe(503);
+		await handle.close();
+		expect(signal?.aborted).toBe(true);
+		await first.catch(() => undefined);
+	});
+
+	it("recovers capacity after DELETE and idle eviction", async () => {
+		const handle = await startStreamableHttpServer(
+			{ transport: "http", host: "127.0.0.1", port: 0 },
+			"test-key",
+			createMcpServer,
+			{ maxSessions: 1, idleTimeoutMs: 200 },
+		);
+		handles.push(handle);
+		const port = serverPort(handle);
+		const first = await initialize(port);
+		const firstSession = String(first.headers["mcp-session-id"]);
+		expect(
+			(
+				await call(port, "DELETE", undefined, {
+					"mcp-session-id": firstSession,
+				})
+			).statusCode,
+		).toBe(200);
+		expect((await initialize(port)).statusCode).toBe(200);
+		const secondInitialize = await initialize(port);
+		expect(secondInitialize.statusCode).toBe(429);
+		await vi.waitFor(
+			async () => expect((await initialize(port)).statusCode).toBe(200),
+			{ timeout: 1_000, interval: 5 },
+		);
+	});
+
+	it("returns a safe 408 when a request body stalls", async () => {
+		const handle = await startStreamableHttpServer(
+			{ transport: "http", host: "127.0.0.1", port: 0 },
+			"test-key",
+			createMcpServer,
+			{ bodyTimeoutMs: 10 },
+		);
+		handles.push(handle);
+		const result = await new Promise<HttpResult>((resolve, reject) => {
+			const client = request(
+				{
+					host: "127.0.0.1",
+					port: serverPort(handle),
+					path: "/mcp",
+					method: "POST",
+				},
+				(response) => {
+					const chunks: Buffer[] = [];
+					response.on("data", (chunk: Buffer) => chunks.push(chunk));
+					response.once("end", () =>
+						resolve({
+							statusCode: response.statusCode,
+							headers: response.headers,
+							body: Buffer.concat(chunks).toString("utf8"),
+						}),
+					);
+				},
+			);
+			client.once("error", reject);
+			client.flushHeaders();
+		});
+		expect(result.statusCode).toBe(408);
+		expect(result.body).toBe('{"error":"Request body timed out."}');
+	});
+
 	it("supports initialize, tools/list, and a mocked tools/call", async () => {
 		const { port } = await startTestServer();
 		const initialized = await initialize(port);
 		expect(initialized.statusCode).toBe(200);
 		const sessionId = initialized.headers["mcp-session-id"];
-		expect(typeof sessionId).toBe("string");
+		expect(stringSchema.safeParse(sessionId).success).toBe(true);
 
 		const headers = { "mcp-session-id": String(sessionId) };
 		const listed = await call(
@@ -305,7 +492,7 @@ describe("Streamable HTTP server", () => {
 		const toolStarted = new Promise<void>((resolve) => {
 			markStarted = resolve;
 		});
-		const createAbortAwareServer = async ({
+		const createAbortAwareServer = ({
 			lifecycleSignal,
 		}: {
 			apiKey: string;
@@ -326,7 +513,7 @@ describe("Streamable HTTP server", () => {
 					return { content: [{ type: "text", text: "aborted" }] };
 				},
 			);
-			return server;
+			return Promise.resolve(server);
 		};
 		const handle = await startStreamableHttpServer(
 			{ transport: "http", host: "127.0.0.1", port: 0 },
@@ -402,9 +589,7 @@ describe("Streamable HTTP server", () => {
 		const handle = await startStreamableHttpServer(
 			{ transport: "http", host: "127.0.0.1", port: 0 },
 			"test-key",
-			async () => {
-				throw new Error("private startup detail");
-			},
+			() => Promise.reject(new Error("private startup detail")),
 		);
 		handles.push(handle);
 
@@ -443,6 +628,8 @@ describe("Streamable HTTP server", () => {
 				"test-key",
 				createMcpServer,
 			),
-		).rejects.toThrow("HEVY_MCP_HTTP_BEARER_TOKEN");
+		).rejects.toThrow(
+			"Set HEVY_MCP_HTTP_BEARER_TOKEN to a secure random value, then retry.",
+		);
 	});
 });

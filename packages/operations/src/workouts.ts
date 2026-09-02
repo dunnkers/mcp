@@ -1,11 +1,14 @@
 import type {
 	HevyClient,
 	HevyExecutionOptions,
-	HevyHttpError,
 	HevyOperationSafety,
 } from "@hevy-mcp/hevy-client";
 import type { GetV1Workouts200, Workout } from "@hevy-mcp/hevy-client/types";
-import { isHevyHttpError } from "@hevy-mcp/hevy-client";
+import {
+	canonicalEndpointIdentity,
+	expectedGet404Outcome,
+	isHevyHttpError,
+} from "@hevy-mcp/hevy-client";
 
 export interface WorkoutsListInput {
 	readonly page: number;
@@ -20,6 +23,35 @@ export interface WorkoutsListOutput {
 }
 
 export type WorkoutsListAdapter = Pick<HevyClient, "getWorkouts">;
+
+export interface WorkoutsGetInput {
+	readonly workoutId: string;
+}
+
+export interface WorkoutsGetOutput {
+	readonly workout: Workout | null;
+	readonly expected404Outcome?: "not_found";
+}
+
+export type WorkoutsGetAdapter = Pick<HevyClient, "getWorkout">;
+
+export interface WorkoutsGetDescriptor {
+	readonly id: "workouts.get";
+	readonly safety: Extract<HevyOperationSafety, "read">;
+}
+
+export const workoutsGetDescriptor: WorkoutsGetDescriptor = {
+	id: "workouts.get",
+	safety: "read",
+};
+
+export interface WorkoutsGetOperation {
+	readonly descriptor: WorkoutsGetDescriptor;
+	execute(
+		input: WorkoutsGetInput,
+		options?: HevyExecutionOptions,
+	): Promise<WorkoutsGetOutput>;
+}
 
 export interface WorkoutsListDescriptor {
 	readonly id: "workouts.list";
@@ -39,13 +71,24 @@ export interface WorkoutsListOperation {
 	): Promise<WorkoutsListOutput>;
 }
 
-function isExpectedEndOfList(error: unknown, page: number): boolean {
+type ErrorInput = Error | string;
+
+function isExpectedWorkoutNotFound(error: ErrorInput): boolean {
+	return (
+		isHevyHttpError(error) &&
+		canonicalEndpointIdentity(error.endpoint) === "/v1/workouts/:workoutId" &&
+		expectedGet404Outcome(error.endpoint, error.method, error.status) ===
+			"not_found"
+	);
+}
+
+function isExpectedEndOfList(error: ErrorInput, page: number): boolean {
 	return (
 		page > 1 &&
 		isHevyHttpError(error) &&
-		error.status === 404 &&
-		error.method.toUpperCase() === "GET" &&
-		error.endpoint === "/v1/workouts"
+		canonicalEndpointIdentity(error.endpoint) === "/v1/workouts" &&
+		expectedGet404Outcome(error.endpoint, error.method, error.status, page) ===
+			"end_of_list"
 	);
 }
 
@@ -65,6 +108,35 @@ function normalizeWorkoutsPage(
 	};
 }
 
+export function createWorkoutsGetOperation(
+	adapter: WorkoutsGetAdapter,
+): WorkoutsGetOperation {
+	return {
+		descriptor: workoutsGetDescriptor,
+		async execute(input, options) {
+			try {
+				const response =
+					options === undefined
+						? await adapter.getWorkout(input.workoutId)
+						: await adapter.getWorkout(input.workoutId, options);
+				return { workout: response ?? null };
+			} catch (error) {
+				if (
+					isExpectedWorkoutNotFound(
+						error instanceof Error ? error : String(error),
+					)
+				) {
+					return {
+						workout: null,
+						expected404Outcome: "not_found",
+					};
+				}
+				throw error;
+			}
+		},
+	};
+}
+
 export function createWorkoutsListOperation(
 	adapter: WorkoutsListAdapter,
 ): WorkoutsListOperation {
@@ -79,7 +151,12 @@ export function createWorkoutsListOperation(
 						: await adapter.getWorkouts(params, options);
 				return normalizeWorkoutsPage(response, input);
 			} catch (error) {
-				if (isExpectedEndOfList(error, input.page)) {
+				if (
+					isExpectedEndOfList(
+						error instanceof Error ? error : String(error),
+						input.page,
+					)
+				) {
 					return {
 						items: [],
 						page: input.page,
@@ -91,11 +168,4 @@ export function createWorkoutsListOperation(
 			}
 		},
 	};
-}
-
-export function isWorkoutsListEndOfList(
-	error: unknown,
-	page: number,
-): error is HevyHttpError {
-	return isExpectedEndOfList(error, page);
 }

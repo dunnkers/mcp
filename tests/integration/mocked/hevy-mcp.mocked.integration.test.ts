@@ -1,5 +1,9 @@
 import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
-import { Client } from "@modelcontextprotocol/client";
+import {
+	Client,
+	type JSONObject,
+	type JSONValue,
+} from "@modelcontextprotocol/client";
 import nock from "nock";
 import {
 	afterAll,
@@ -16,6 +20,13 @@ import { registerHevyTools } from "../../../packages/core/src/tools/register.js"
 import { createToolRuntime } from "../../../packages/core/src/tools/tool-runtime.js";
 import { createExerciseTemplateCatalog } from "../../../packages/core/src/utils/exercise-template-catalog.js";
 import { createHevyClient } from "../../../packages/hevy-client/src/hevy-client.js";
+import { z } from "zod";
+
+const stringSchema = z.string();
+
+function isString(value: JSONValue | undefined): value is string {
+	return stringSchema.safeParse(value).success;
+}
 
 const HEVY_API_BASEURL = "https://api.hevyapp.com";
 const MOCK_HEVY_API_KEY = "mock-hevy-api-key";
@@ -28,11 +39,7 @@ function getApiScope() {
 	});
 }
 
-async function callTool(
-	client: Client,
-	name: string,
-	arguments_: Record<string, unknown>,
-) {
+async function callTool(client: Client, name: string, arguments_: JSONObject) {
 	const result = await client.request({
 		method: "tools/call",
 		params: {
@@ -144,7 +151,10 @@ describe("Hevy MCP Server Mocked Integration Tests", () => {
 
 		expect(readOnlyTools).toHaveLength(readOnlyNames.size);
 		for (const tool of readOnlyTools) {
-			expect(tool.outputSchema, `${tool.name} output schema`).toBeTruthy();
+			expect(tool.outputSchema, `${tool.name} output schema`).toMatchObject({
+				type: "object",
+				properties: expect.any(Object),
+			});
 		}
 	});
 
@@ -200,7 +210,7 @@ describe("Hevy MCP Server Mocked Integration Tests", () => {
 			exercise_count: 0,
 			set_count: 0,
 		});
-		expect(typeof structuredContent.workouts[0]?.id).toBe("string");
+		expect(isString(structuredContent.workouts[0]?.id)).toBe(true);
 		expect(structuredContent.workouts[0]).not.toHaveProperty("exercises");
 		expect(payload).toEqual(structuredContent.workouts);
 	});
@@ -232,7 +242,7 @@ describe("Hevy MCP Server Mocked Integration Tests", () => {
 		});
 		const structuredContent = result.structuredContent as {
 			workout: {
-				exercises: Array<Record<string, unknown>>;
+				exercises: Array<object>;
 			};
 		};
 
@@ -287,6 +297,7 @@ describe("Hevy MCP Server Mocked Integration Tests", () => {
 					description: null,
 					start_time: "2025-03-27T07:00:00Z",
 					end_time: "2025-03-27T08:00:00Z",
+					is_private: false,
 					exercises: [
 						{
 							exercise_template_id: "bench",
@@ -338,7 +349,7 @@ describe("Hevy MCP Server Mocked Integration Tests", () => {
 
 		const result = await callTool(client, "update-workout", {
 			workout_id: "w1",
-			workout: { title: "Renamed", description: null },
+			workout: { title: "Renamed", description: null, is_private: false },
 		});
 		expect(requestMethods).toEqual(["GET", "PUT"]);
 		const payload: unknown = JSON.parse(result.text);
@@ -428,7 +439,7 @@ describe("Hevy MCP Server Mocked Integration Tests", () => {
 			exercise_count: 1,
 			set_count: 0,
 		});
-		expect(typeof structuredContent.routines[0]?.id).toBe("string");
+		expect(isString(structuredContent.routines[0]?.id)).toBe(true);
 		expect(structuredContent.routines[0]).not.toHaveProperty("exercises");
 		expect(payload).toEqual(structuredContent.routines);
 	});
@@ -461,7 +472,7 @@ describe("Hevy MCP Server Mocked Integration Tests", () => {
 		const structuredContent = result.structuredContent as {
 			routine: {
 				folder_id?: number;
-				exercises: Array<Record<string, unknown>>;
+				exercises: Array<object>;
 			};
 		};
 
