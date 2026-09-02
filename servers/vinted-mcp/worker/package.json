@@ -1,0 +1,23 @@
+{
+	"name": "vinted-mcp-worker",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Cloudflare Worker wrapper around the vendored vinted-mcp MCP server.",
+	"type": "module",
+	"scripts": {
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy",
+		"test": "vitest run",
+		"check:types": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@andrijdavid/vinted-mcp": "file:..",
+		"@modelcontextprotocol/sdk": "1.29.0"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^5.20260902.1",
+		"typescript": "^7.0.2",
+		"vitest": "^4.1.11",
+		"wrangler": "^4.128.0"
+	}
+}
