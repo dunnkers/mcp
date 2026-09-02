@@ -19,3 +19,9 @@ Jeroen's MCP servers.
   with a [`worker/`](servers/vinted-mcp/worker) wrapper deployed as a
   Cloudflare Worker. See [docs/vinted-mcp.md](docs/vinted-mcp.md) for setup
   and deploy details.
+- [`servers/bark-worker`](servers/bark-worker) — [Bark](https://github.com/Finb/Bark)
+  push notification server (upstream:
+  [cwxiaos/bark-worker](https://github.com/cwxiaos/bark-worker)), a
+  Worker-native Bark-Server reimplementation with a built-in MCP endpoint,
+  deployed as a Cloudflare Worker backed by D1. See
+  [docs/bark-worker.md](docs/bark-worker.md) for setup and deploy details.
