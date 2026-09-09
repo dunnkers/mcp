@@ -1,0 +1,64 @@
+name: Deploy crawl4ai-mcp
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/deploy-crawl4ai-mcp.yml
+      - docs/crawl4ai-mcp.md
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-crawl4ai-mcp
+  cancel-in-progress: false
+
+env:
+  # Bump this to redeploy a newer Crawl4AI release; then run this workflow
+  # manually (workflow_dispatch) since the image tag alone doesn't trigger it.
+  IMAGE: docker.io/unclecode/crawl4ai:0.9.3
+  SERVICE: crawl4ai-mcp
+
+jobs:
+  deploy:
+    name: Deploy to Cloud Run
+    runs-on: ubuntu-latest
+    environment:
+      name: crawl4ai-mcp-production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA_EMAIL }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "$SERVICE" \
+            --image="$IMAGE" \
+            --region="$GCP_REGION" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --execution-environment=gen2 \
+            --min-instances=0 \
+            --max-instances=1 \
+            --port=11235 \
+            --memory=2Gi \
+            --cpu=2 \
+            --timeout=300 \
+            --service-account="$GCP_RUNTIME_SA_EMAIL" \
+            --set-secrets="CRAWL4AI_API_TOKEN=crawl4ai-api-token:latest"
+        env:
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GCP_RUNTIME_SA_EMAIL: ${{ secrets.GCP_RUNTIME_SA_EMAIL }}
