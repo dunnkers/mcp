@@ -181,7 +181,13 @@ export async function tokensMatch(a: string, b: string): Promise<boolean> {
 	return diff === 0;
 }
 
-const BRIDGE_TIMEOUT_MS = 20_000;
+// crawl4ai-mcp's Cloud Run deployment runs --min-instances=0 and
+// --timeout=300 (see docs/crawl4ai-mcp.md): the first request after idle
+// pays full container + headless-Chromium boot time, which a short timeout
+// here would never survive. Every bridged request opens a brand-new SSE
+// session (crawl4ai's design is stateless across requests), so this cost
+// can recur even when the container itself is already warm.
+const BRIDGE_TIMEOUT_MS = 90_000;
 
 export function jsonRpcError(id: unknown, code: number, message: string): Response {
 	return Response.json(
