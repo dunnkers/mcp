@@ -64,6 +64,14 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
+      - name: Substitute the real KV namespace id and upstream origin
+        env:
+          KV_NAMESPACE_ID: ${{ secrets.CLOUDFLARE_OAUTH_KV_NAMESPACE_ID }}
+          UPSTREAM_ORIGIN: ${{ vars.CRAWL4AI_UPSTREAM_ORIGIN }}
+        run: |
+          sed -i "s/00000000000000000000000000000000/${KV_NAMESPACE_ID}/" wrangler.jsonc
+          sed -i "s#REPLACE_WITH_CLOUD_RUN_URL#${UPSTREAM_ORIGIN}#" wrangler.jsonc
+
       - name: Deploy Worker
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

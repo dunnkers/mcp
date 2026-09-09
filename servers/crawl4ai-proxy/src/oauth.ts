@@ -30,6 +30,7 @@ const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 export interface Env {
 	OAUTH_KV: KVNamespace;
 	CRAWL4AI_API_TOKEN: string;
+	UPSTREAM_ORIGIN: string;
 }
 
 interface OAuthProviderEnv extends Env {
@@ -102,8 +103,6 @@ async function handleAuthorizePost(
 	}
 }
 
-const UPSTREAM_ORIGIN = "https://crawl4ai-mcp-500845880919.europe-west4.run.app";
-
 /**
  * Forwards an already-OAuth-authenticated request to the real crawl4ai
  * service, swapping in the real `CRAWL4AI_API_TOKEN` as the Bearer header.
@@ -112,7 +111,7 @@ const UPSTREAM_ORIGIN = "https://crawl4ai-mcp-500845880919.europe-west4.run.app"
  */
 async function proxyToUpstream(request: Request, env: Env): Promise<Response> {
 	const url = new URL(request.url);
-	const upstreamUrl = new URL(url.pathname + url.search, UPSTREAM_ORIGIN);
+	const upstreamUrl = new URL(url.pathname + url.search, env.UPSTREAM_ORIGIN);
 
 	const upstreamHeaders = new Headers(request.headers);
 	upstreamHeaders.delete("host");

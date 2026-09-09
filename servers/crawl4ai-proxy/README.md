@@ -31,13 +31,30 @@ on every connection attempt). This Worker implements that protocol properly:
 ## Setup
 
 1. Create the KV namespace used to store OAuth clients/grants/tokens (already
-   done for this deployment — see `wrangler.jsonc`'s `kv_namespaces` id).
-2. Set the shared secret (same value as the `crawl4ai-api-token` secret in
+   done for this deployment). `wrangler.jsonc` commits a placeholder id
+   (`00000000000000000000000000000000`) rather than the real one, since this
+   is a public repo — the deploy workflow substitutes the real id from the
+   `CLOUDFLARE_OAUTH_KV_NAMESPACE_ID` environment secret before running
+   `wrangler deploy` (same pattern as `hevy-mcp`'s `cloudflare.config.ts`).
+   To deploy manually instead, edit the id into a local, uncommitted copy of
+   `wrangler.jsonc` (`git status` before committing anything afterward), or
+   run the same substitution the workflow does:
+   ```bash
+   sed -i "s/00000000000000000000000000000000/<real-id>/" wrangler.jsonc
+   npx wrangler deploy
+   git checkout wrangler.jsonc  # restore the placeholder afterward
+   ```
+2. Same idea for `UPSTREAM_ORIGIN` (the crawl4ai-mcp Cloud Run URL) — not
+   secret, but still an account/project-identifying value, so it's a
+   `vars` placeholder (`REPLACE_WITH_CLOUD_RUN_URL`) substituted from the
+   `CRAWL4AI_UPSTREAM_ORIGIN` GitHub Actions **variable** (not a secret,
+   since the value isn't sensitive) using the same `sed` approach as above.
+3. Set the shared secret (same value as the `crawl4ai-api-token` secret in
    GCP Secret Manager for the Cloud Run deployment):
    ```bash
    npx wrangler secret put CRAWL4AI_API_TOKEN
    ```
-3. Deploy: `npm run deploy` (or push to `main` — see
+4. Deploy: `npm run deploy` (or push to `main` — see
    `.github/workflows/deploy-crawl4ai-proxy.yml`).
 
 ## Connecting from Claude
