@@ -4,6 +4,21 @@
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 
 export const AUTHORIZE_PATH = "/authorize";
+export const MCP_PATH = "/mcp";
+
+/**
+ * crawl4ai-mcp's real MCP endpoint lives at `/mcp/sse` (legacy SSE
+ * transport — confirmed live: plain `/mcp` 404s on the upstream Cloud Run
+ * service). claude.ai's client connects to whatever base path the
+ * connector was configured with, `/mcp`, since that's the modern
+ * Streamable HTTP convention. Rewrite just that one path; the SSE
+ * session's own follow-up requests to `/mcp/messages/...` (named by
+ * crawl4ai itself, mid-stream) are already correct and pass through
+ * unchanged.
+ */
+export function upstreamPath(pathname: string): string {
+	return pathname === MCP_PATH ? `${MCP_PATH}/sse` : pathname;
+}
 
 export function escapeHtml(value: string): string {
 	return value
