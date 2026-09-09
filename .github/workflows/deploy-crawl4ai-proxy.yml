@@ -67,7 +67,12 @@ jobs:
       - name: Substitute the real KV namespace id and upstream origin
         env:
           KV_NAMESPACE_ID: ${{ secrets.CLOUDFLARE_OAUTH_KV_NAMESPACE_ID }}
-          UPSTREAM_ORIGIN: ${{ vars.CRAWL4AI_UPSTREAM_ORIGIN }}
+          # Stored as a secret rather than a repository variable purely so
+          # GitHub auto-redacts it wherever it appears in this public repo's
+          # Actions logs — including `wrangler deploy`'s own bindings
+          # summary below, which would otherwise print it in cleartext.
+          # Variables (vars.*) don't get that redaction; only secrets do.
+          UPSTREAM_ORIGIN: ${{ secrets.CRAWL4AI_UPSTREAM_ORIGIN }}
         run: |
           sed -i "s/00000000000000000000000000000000/${KV_NAMESPACE_ID}/" wrangler.jsonc
           sed -i "s#REPLACE_WITH_CLOUD_RUN_URL#${UPSTREAM_ORIGIN}#" wrangler.jsonc
