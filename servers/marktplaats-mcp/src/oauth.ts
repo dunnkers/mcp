@@ -7,12 +7,10 @@ import {
 } from "@cloudflare/workers-oauth-provider";
 import {
 	AUTHORIZE_PATH,
-	bridgeMcpRequest,
 	decodeAuthRequest,
 	encodeAuthRequest,
 	errorResponse,
 	htmlResponse,
-	isMcpEntryPath,
 	MCP_PATH,
 	renderAuthorizePage,
 	tokensMatch,
@@ -24,15 +22,19 @@ const REGISTER_PATH = "/register";
 // One-hour access tokens would make claude.ai refresh several times a day,
 // and every refresh writes to KV. This is a single-user personal deployment,
 // so a long-lived session is fine and keeps well under KV's free-plan write
-// quota (mirrors the reasoning in hevy-mcp's worker-oauth.ts, which runs the
-// same library against the same Cloudflare account).
+// quota (same reasoning as crawl4ai-proxy's oauth.ts and hevy-mcp's
+// worker-oauth.ts in this repo, which run the same library against the same
+// Cloudflare account).
 const ACCESS_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 export interface Env {
 	OAUTH_KV: KVNamespace;
-	CRAWL4AI_API_TOKEN: string;
-	UPSTREAM_ORIGIN: string;
+	// Gates the /authorize consent form. This server has no real upstream
+	// credential to guard (Marktplaats needs no API key), so this token exists
+	// purely to control who can mint an OAuth grant against this Worker. Set
+	// via `wrangler secret put AUTH_TOKEN`.
+	AUTH_TOKEN: string;
 	// Volumetric abuse protection, checked in index.ts before this provider
 	// ever sees the request. See rate-limit.ts.
 	RATE_LIMITER: RateLimit;
@@ -86,8 +88,8 @@ async function handleAuthorizePost(
 
 	const submitted = form.get("token");
 	const token = typeof submitted === "string" ? submitted.trim() : "";
-	if (!token) return rerender("Enter the crawl4ai API token.", 400);
-	if (!(await tokensMatch(token, env.CRAWL4AI_API_TOKEN))) {
+	if (!token) return rerender("Enter the access token.", 400);
+	if (!(await tokensMatch(token, env.AUTH_TOKEN))) {
 		return rerender("Incorrect token.", 401);
 	}
 
@@ -108,14 +110,17 @@ async function handleAuthorizePost(
 	}
 }
 
-export function createOAuthProvider(resourceUrl: string) {
+export function createOAuthProvider(
+	resourceUrl: string,
+	handleMcpRequest: (request: Request) => Promise<Response>,
+) {
 	return new OAuthProvider({
 		apiRoute: MCP_PATH,
 		apiHandler: {
-			fetch: (request: Request, env: Env) => {
+			fetch: (request: Request) => {
 				const pathname = new URL(request.url).pathname;
-				if (request.method === "POST" && isMcpEntryPath(pathname)) {
-					return bridgeMcpRequest(request, env.UPSTREAM_ORIGIN, env.CRAWL4AI_API_TOKEN);
+				if (request.method === "POST" && pathname === MCP_PATH) {
+					return handleMcpRequest(request);
 				}
 				return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
 			},
@@ -128,19 +133,22 @@ export function createOAuthProvider(resourceUrl: string) {
 			fetch: async (request: Request, env: Env) => {
 				const helpers = (env as OAuthProviderEnv).OAUTH_PROVIDER;
 				const url = new URL(request.url);
-				if (url.pathname !== AUTHORIZE_PATH) {
-					return new Response("Not found", { status: 404 });
+				if (url.pathname === AUTHORIZE_PATH) {
+					if (request.method === "GET") return handleAuthorizeGet(request, helpers);
+					if (request.method === "POST") return handleAuthorizePost(request, env, helpers);
+					return new Response("Method not allowed", {
+						status: 405,
+						headers: { Allow: "GET, POST" },
+					});
 				}
-				if (request.method === "GET") {
-					return handleAuthorizeGet(request, helpers);
+				if (url.pathname === "/" || url.pathname === "") {
+					return Response.json({
+						name: "marktplaats-mcp",
+						description: "MCP server for searching and browsing Marktplaats.nl listings.",
+						mcp_endpoint: MCP_PATH,
+					});
 				}
-				if (request.method === "POST") {
-					return handleAuthorizePost(request, env, helpers);
-				}
-				return new Response("Method not allowed", {
-					status: 405,
-					headers: { Allow: "GET, POST" },
-				});
+				return new Response("Not found", { status: 404 });
 			},
 		},
 		authorizeEndpoint: AUTHORIZE_PATH,
@@ -152,7 +160,7 @@ export function createOAuthProvider(resourceUrl: string) {
 		clientIdMetadataDocumentEnabled: true,
 		allowPlainPKCE: false,
 		resourceMetadata: {
-			resource_name: "crawl4ai MCP Server",
+			resource_name: "marktplaats-mcp Server",
 			resource: resourceUrl,
 		},
 		// claude.ai's CIMD client metadata document advertises
@@ -164,7 +172,8 @@ export function createOAuthProvider(resourceUrl: string) {
 		// this stub must be present for claude.ai's custom connector to
 		// complete authorization at all — trustedIssuers never trusts an
 		// issuer, since this server has no real enterprise SSO to offer.
-		// (Same gotcha, same fix, as hevy-mcp's worker-oauth.ts in this repo.)
+		// (Same gotcha, same fix, as crawl4ai-proxy's oauth.ts and hevy-mcp's
+		// worker-oauth.ts in this repo.)
 		enterpriseManagedAuthorization: {
 			trustedIssuers: async () => null,
 			mapClaims: async () => {

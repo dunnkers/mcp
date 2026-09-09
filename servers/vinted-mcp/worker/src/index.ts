@@ -1,56 +1,33 @@
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-// Reuse the vendored server as-is: it wires up all tools/resources/prompts
-// on a raw @modelcontextprotocol/sdk Server. We only supply the transport.
-// Imported via the `file:..` link (see package.json) rather than a `../../src`
-// relative path, because wrangler's bundler doesn't resolve node_modules for
-// files living outside its own project directory.
-import { createServer } from "@andrijdavid/vinted-mcp/src/index";
+import { handleMcpRequest } from "./mcp-handler.js";
+import { createOAuthProvider, type Env } from "./oauth.js";
+import { checkRateLimit } from "./rate-limit.js";
 
-async function handleMcpRequest(request: Request): Promise<Response> {
-	const server = createServer();
-	const transport = new WebStandardStreamableHTTPServerTransport({
-		// Stateless: no Durable Object, no session state kept between requests.
-		sessionIdGenerator: undefined,
-		// A single JSON body instead of an SSE stream, so we can safely close
-		// the transport/server right after the response is built.
-		enableJsonResponse: true,
-	});
-	await server.connect(transport);
-	try {
-		return await transport.handleRequest(request);
-	} finally {
-		await transport.close();
-		await server.close();
-	}
+/**
+ * Lazily builds (and memoizes per canonical origin) the OAuth provider.
+ * Construction needs the deployment's own origin for `resourceMetadata.resource`
+ * — the bare origin, matching what claude.ai's client actually sends as the
+ * `resource` parameter — which is only known once a request arrives, since
+ * Workers don't expose the request origin at module-eval time.
+ */
+function createProviderGetter() {
+	let cached: { origin: string; provider: ReturnType<typeof createOAuthProvider> } | null = null;
+	return function getProvider(request: Request) {
+		const origin = new URL(request.url).origin;
+		if (cached === null || cached.origin !== origin) {
+			cached = { origin, provider: createOAuthProvider(origin, handleMcpRequest) };
+		}
+		return cached.provider;
+	};
 }
 
+const getProvider = createProviderGetter();
+
 export default {
-	async fetch(request: Request, _env: unknown, _ctx: ExecutionContext): Promise<Response> {
-		const url = new URL(request.url);
-
-		if (url.pathname === "/mcp") {
-			if (request.method === "GET" || request.method === "DELETE") {
-				return Response.json(
-					{
-						jsonrpc: "2.0",
-						error: { code: -32000, message: "Method not allowed." },
-						id: null,
-					},
-					{ status: 405 },
-				);
-			}
-			return handleMcpRequest(request);
-		}
-
-		if (url.pathname === "/" || url.pathname === "") {
-			return Response.json({
-				name: "vinted-mcp",
-				description:
-					"MCP server for searching and comparing Vinted marketplace listings across 19 countries.",
-				mcp_endpoint: "/mcp",
-			});
-		}
-
-		return new Response("Not found", { status: 404 });
+	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		// Checked before anything else — no OAuth/KV lookup, no MCP server, no
+		// Vinted request — so a flood is denied as cheaply as possible.
+		const limited = await checkRateLimit(request, env);
+		if (limited) return limited;
+		return getProvider(request).fetch(request, env, ctx);
 	},
-} satisfies ExportedHandler;
+} satisfies ExportedHandler<Env>;

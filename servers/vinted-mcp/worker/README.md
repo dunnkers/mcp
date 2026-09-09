@@ -7,15 +7,19 @@ listings across 19 countries).
 
 This directory contains only the Worker glue — the actual tools, API client,
 and response parsers live in `../src` and are reused unmodified via a
-`file:..` local dependency (see `package.json`). `src/index.ts` here does
-nothing but:
+`file:..` local dependency (see `package.json`). `src/mcp-handler.ts` here
+does nothing but:
 
 1. Call the vendored `createServer()` (from `../src/index.ts`), which wires
    up all six tools, both resources, and the prompts on a raw
    `@modelcontextprotocol/sdk` `Server`.
 2. Connect it to `@modelcontextprotocol/sdk`'s
    `WebStandardStreamableHTTPServerTransport` in stateless, JSON-response
-   mode, and route `/mcp` requests to it.
+   mode, so a single request can be handled end-to-end.
+
+`src/index.ts` wires that handler up behind the OAuth provider described
+under [Access control](#access-control) below, routing authorized `/mcp`
+requests to it.
 
 ## Why a `file:..` dependency instead of a relative import?
 
@@ -28,7 +32,36 @@ to the vendored root, so `import { createServer } from
 "@andrijdavid/vinted-mcp/src/index"` resolves through this project's own
 `node_modules` like any other dependency.
 
-## Auth mode
+## Access control
+
+`/mcp` is protected by a real OAuth 2.1 flow, built on
+[`@cloudflare/workers-oauth-provider`](https://www.npmjs.com/package/@cloudflare/workers-oauth-provider)
+(the same library `hevy-mcp`, `crawl4ai-proxy`, and `marktplaats-mcp` already
+use in this account). This Worker's `*.workers.dev` URL is public — it's
+printed in deploy logs and derivable from the repo — so anonymous access has
+to be denied at the edge rather than relying on the URL being secret. A
+client (claude.ai's custom-connector UI, or any other OAuth-aware MCP client)
+discovers the Worker via the standard `.well-known` endpoints, is redirected
+to `/authorize` to enter the `AUTH_TOKEN` once, and from then on authenticates
+with its own OAuth access token — never the shared token itself. Requests to
+`/mcp` without a valid token are rejected before the MCP server (or any
+Vinted request) ever runs.
+
+### Setup
+
+1. Reuse the account's existing OAuth KV namespace (same one `crawl4ai-proxy`,
+   `hevy-mcp`, and `marktplaats-mcp` use) — `wrangler.jsonc` commits a
+   placeholder id (`00000000000000000000000000000000`); the deploy workflow
+   substitutes the real id from the `CLOUDFLARE_OAUTH_KV_NAMESPACE_ID`
+   repository secret before running `wrangler deploy`.
+2. Set the consent-page password:
+   ```bash
+   npx wrangler secret put AUTH_TOKEN
+   ```
+3. Deploy: `npm run deploy` (or push to `main` — see
+   `.github/workflows/deploy-vinted-mcp.yml`).
+
+## Vinted auth mode
 
 The vendored client supports three auth modes (`http`, `playwright`, `env`).
 This Worker always runs in the default **`http`** mode — a fetch-only
