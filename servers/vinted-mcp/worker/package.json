@@ -12,6 +12,7 @@
 	},
 	"dependencies": {
 		"@andrijdavid/vinted-mcp": "file:..",
+		"@cloudflare/workers-oauth-provider": "^0.10.3",
 		"@modelcontextprotocol/sdk": "1.29.0"
 	},
 	"devDependencies": {
