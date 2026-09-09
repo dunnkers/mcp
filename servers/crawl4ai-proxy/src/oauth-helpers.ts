@@ -181,13 +181,12 @@ export async function tokensMatch(a: string, b: string): Promise<boolean> {
 	return diff === 0;
 }
 
-// crawl4ai-mcp's Cloud Run deployment runs --min-instances=0 and
-// --timeout=300 (see docs/crawl4ai-mcp.md): the first request after idle
-// pays full container + headless-Chromium boot time, which a short timeout
-// here would never survive. Every bridged request opens a brand-new SSE
-// session (crawl4ai's design is stateless across requests), so this cost
-// can recur even when the container itself is already warm.
-const BRIDGE_TIMEOUT_MS = 90_000;
+// Confirmed live (manual curl against crawl4ai directly, bypassing this
+// proxy): a message posted to a session responds in a couple of seconds
+// once nothing else is contending for the single Cloud Run instance
+// (--max-instances=1). 30s is generous headroom above that, not an
+// allowance for real crawl4ai slowness.
+const BRIDGE_TIMEOUT_MS = 30_000;
 
 export function jsonRpcError(id: unknown, code: number, message: string): Response {
 	return Response.json(
@@ -260,14 +259,21 @@ export async function bridgeMcpRequest(
 	// stop, no need to hold a session open waiting for one that never comes.
 	const isNotification = requestId === undefined || requestId === null;
 
+	// Tied to the *incoming* request's own signal, not just our own timer:
+	// when claude.ai gives up and disconnects (observed live — it doesn't
+	// wait long), this tears down crawl4ai's SSE session immediately
+	// instead of leaving it open for the full timeout. Each abandoned
+	// session otherwise sits on crawl4ai's single Cloud Run instance until
+	// Cloud Run's own request timeout, and a pile-up of those from repeated
+	// client retries can plausibly starve the next attempt's response —
+	// consistent with what a burst of retries looked like live.
 	const authHeader = `Bearer ${crawl4aiApiToken}`;
-	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), BRIDGE_TIMEOUT_MS);
+	const signal = AbortSignal.any([request.signal, AbortSignal.timeout(BRIDGE_TIMEOUT_MS)]);
 	let sessionReader: ReturnType<typeof createSseSessionReader> | undefined;
 	try {
 		const sseResponse = await fetch(new URL(MCP_SSE_PATH, upstreamOrigin), {
 			headers: { authorization: authHeader, accept: "text/event-stream" },
-			signal: controller.signal,
+			signal,
 		});
 		if (!sseResponse.ok || !sseResponse.body) {
 			console.error("bridge: crawl4ai session open failed", {
@@ -276,7 +282,7 @@ export async function bridgeMcpRequest(
 			});
 			return jsonRpcError(requestId, -32000, `crawl4ai session open failed: ${sseResponse.status}`);
 		}
-		sessionReader = createSseSessionReader(sseResponse.body, controller.signal);
+		sessionReader = createSseSessionReader(sseResponse.body, signal);
 
 		const messagesPath = await sessionReader.waitFor((frame) =>
 			frame.event === "endpoint" || frame.data.startsWith("/mcp/messages/")
@@ -288,7 +294,7 @@ export async function bridgeMcpRequest(
 			method: "POST",
 			headers: { authorization: authHeader, "content-type": "application/json" },
 			body: bodyText,
-			signal: controller.signal,
+			signal,
 		});
 		if (!messagesResponse.ok) {
 			console.error("bridge: crawl4ai rejected the message", {
@@ -306,16 +312,26 @@ export async function bridgeMcpRequest(
 		const result = await sessionReader.waitFor((frame) => {
 			try {
 				const parsed = JSON.parse(frame.data) as { id?: unknown };
-				return parsed.id === requestId ? parsed : undefined;
+				if (parsed.id === requestId) return parsed;
+				console.error("bridge: saw a response-shaped frame that didn't match our request id", {
+					wantedId: requestId,
+					wantedIdType: typeof requestId,
+					sawId: parsed.id,
+					sawIdType: typeof parsed.id,
+				});
+				return undefined;
 			} catch {
 				return undefined;
 			}
 		});
 		return Response.json(result);
 	} catch (error) {
-		if (controller.signal.aborted) {
-			console.error("bridge: timed out waiting for crawl4ai's response");
-			return jsonRpcError(requestId, -32000, "Timed out waiting for crawl4ai's response");
+		if (signal.aborted) {
+			const reason = request.signal.aborted
+				? "the client disconnected"
+				: "timed out waiting for crawl4ai's response";
+			console.error(`bridge: aborted — ${reason}`);
+			return jsonRpcError(requestId, -32000, `Bridge aborted: ${reason}`);
 		}
 		console.error("bridge: unexpected error", {
 			message: error instanceof Error ? error.message : String(error),
@@ -323,7 +339,6 @@ export async function bridgeMcpRequest(
 		});
 		return jsonRpcError(requestId, -32000, error instanceof Error ? error.message : String(error));
 	} finally {
-		clearTimeout(timeout);
 		await sessionReader?.close();
 	}
 }

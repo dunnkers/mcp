@@ -47,8 +47,11 @@ on every connection attempt). This Worker implements that protocol properly:
 2. Same idea for `UPSTREAM_ORIGIN` (the crawl4ai-mcp Cloud Run URL) — not
    secret, but still an account/project-identifying value, so it's a
    `vars` placeholder (`REPLACE_WITH_CLOUD_RUN_URL`) substituted from the
-   `CRAWL4AI_UPSTREAM_ORIGIN` GitHub Actions **variable** (not a secret,
-   since the value isn't sensitive) using the same `sed` approach as above.
+   `CRAWL4AI_UPSTREAM_ORIGIN` GitHub Actions **secret** using the same
+   `sed` approach as above. It's stored as a secret rather than a plain
+   repository variable purely so GitHub auto-redacts it from this public
+   repo's Actions logs — `wrangler deploy`'s own bindings summary prints
+   the value otherwise, and only secrets get that redaction.
 3. Set the shared secret (same value as the `crawl4ai-api-token` secret in
    GCP Secret Manager for the Cloud Run deployment):
    ```bash
