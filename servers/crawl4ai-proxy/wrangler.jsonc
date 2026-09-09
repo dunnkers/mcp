@@ -1,0 +1,32 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "crawl4ai-proxy",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-01",
+	"observability": {
+		"enabled": true,
+	},
+	// Stores OAuth clients, grants, and tokens issued by
+	// @cloudflare/workers-oauth-provider. The real namespace id is
+	// account-specific and isn't committed here (this is a public repo) —
+	// the deploy workflow substitutes it from the CLOUDFLARE_OAUTH_KV_NAMESPACE_ID
+	// environment secret before running `wrangler deploy`, same pattern as
+	// hevy-mcp's cloudflare.config.ts in this repo. See README for local dev.
+	"kv_namespaces": [
+		{
+			"binding": "OAUTH_KV",
+			"id": "00000000000000000000000000000000",
+		},
+	],
+	// UPSTREAM_ORIGIN isn't secret, but it names the specific Cloud Run
+	// service/project — the deploy workflow substitutes the real value from
+	// the CRAWL4AI_UPSTREAM_ORIGIN repository variable, same substitution
+	// pattern as the KV namespace id above. See README for local dev.
+	"vars": {
+		"UPSTREAM_ORIGIN": "REPLACE_WITH_CLOUD_RUN_URL",
+	},
+	// CRAWL4AI_API_TOKEN is set as a secret (`wrangler secret put
+	// CRAWL4AI_API_TOKEN`), not here — same token value as the crawl4ai-mcp
+	// Cloud Run deployment's Secret Manager secret. It doubles as the
+	// passphrase this Worker's /authorize consent page checks against.
+}

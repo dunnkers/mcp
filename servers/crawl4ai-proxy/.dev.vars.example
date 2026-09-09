@@ -1,0 +1,2 @@
+CRAWL4AI_API_TOKEN=same-value-as-the-crawl4ai-mcp-cloud-run-secret
+UPSTREAM_ORIGIN=https://<your-crawl4ai-mcp-cloud-run-service>.run.app
