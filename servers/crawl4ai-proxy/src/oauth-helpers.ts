@@ -312,7 +312,14 @@ export async function bridgeMcpRequest(
 		const result = await sessionReader.waitFor((frame) => {
 			try {
 				const parsed = JSON.parse(frame.data) as { id?: unknown };
-				return parsed.id === requestId ? parsed : undefined;
+				if (parsed.id === requestId) return parsed;
+				console.error("bridge: saw a response-shaped frame that didn't match our request id", {
+					wantedId: requestId,
+					wantedIdType: typeof requestId,
+					sawId: parsed.id,
+					sawIdType: typeof parsed.id,
+				});
+				return undefined;
 			} catch {
 				return undefined;
 			}
