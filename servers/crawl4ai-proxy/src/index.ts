@@ -1,96 +1,29 @@
+/// <reference types="@cloudflare/workers-types" />
+
+import { createOAuthProvider, type Env } from "./oauth.js";
+
 /**
- * Auth-shape translation proxy for crawl4ai-mcp.
- *
- * claude.ai's SSE custom-connector UI accepts a manually configured
- * `Authorization` header, but never actually sends it on the wire (verified
- * via Cloud Run request logs while debugging a 401 loop). crawl4ai itself
- * only accepts the token as a `Bearer` header, not a query param. This
- * worker bridges the two: it takes the token from a `?token=` query param
- * (which claude.ai *does* preserve, since it's just part of the connector
- * URL) and forwards it upstream as `Authorization: Bearer <token>`.
- *
- * crawl4ai's SSE transport is two-step: opening `/mcp/sse` returns a
- * `data: /mcp/messages/?session_id=...` event naming a relative follow-up
- * URL, and clients POST subsequent JSON-RPC messages there. That follow-up
- * request needs its own auth. Since this worker is stateless (no KV/Durable
- * Object) and never stores the token, the follow-up URL is rewritten
- * on the fly, in the streamed response body, to carry the token forward as
- * a query param too — so it round-trips through the client without the
- * worker having to remember anything.
+ * Lazily builds (and memoizes per canonical origin) the OAuth provider.
+ * Construction needs the deployment's own origin for `resourceMetadata.resource`
+ * — the bare origin, matching what claude.ai's client actually sends as the
+ * `resource` parameter — which is only known once a request arrives, since
+ * Workers don't expose the request origin at module-eval time.
  */
-
-const UPSTREAM_ORIGIN = "https://crawl4ai-mcp-500845880919.europe-west4.run.app";
-
-function unauthorized(message: string): Response {
-	return Response.json({ error: message }, { status: 401 });
+function createProviderGetter() {
+	let cached: { origin: string; provider: ReturnType<typeof createOAuthProvider> } | null = null;
+	return function getProvider(request: Request) {
+		const origin = new URL(request.url).origin;
+		if (cached === null || cached.origin !== origin) {
+			cached = { origin, provider: createOAuthProvider(origin) };
+		}
+		return cached.provider;
+	};
 }
 
-/** Rewrites `data: /mcp/messages/?session_id=X` lines to append `&token=`. */
-function rewriteEndpointEvent(token: string) {
-	let buffered = "";
-	const encoder = new TextEncoder();
-	const decoder = new TextDecoder();
-
-	return new TransformStream<Uint8Array, Uint8Array>({
-		transform(chunk, controller) {
-			buffered += decoder.decode(chunk, { stream: true });
-			const lines = buffered.split("\n");
-			// Last element may be a partial line; hold it back until more data arrives.
-			buffered = lines.pop() ?? "";
-			for (const line of lines) {
-				controller.enqueue(encoder.encode(`${rewriteLine(line, token)}\n`));
-			}
-		},
-		flush(controller) {
-			if (buffered.length > 0) {
-				controller.enqueue(encoder.encode(rewriteLine(buffered, token)));
-			}
-		},
-	});
-}
-
-function rewriteLine(line: string, token: string): string {
-	const prefix = "data: /mcp/messages/";
-	if (!line.startsWith(prefix)) return line;
-	const path = line.slice("data: ".length);
-	const url = new URL(path, "https://placeholder.invalid");
-	url.searchParams.set("token", token);
-	return `data: ${url.pathname}${url.search}`;
-}
+const getProvider = createProviderGetter();
 
 export default {
-	async fetch(request: Request): Promise<Response> {
-		const url = new URL(request.url);
-		const token = url.searchParams.get("token");
-		if (!token) {
-			return unauthorized("Missing ?token= query param.");
-		}
-
-		const upstreamUrl = new URL(url.pathname + url.search, UPSTREAM_ORIGIN);
-		upstreamUrl.searchParams.delete("token");
-
-		const upstreamHeaders = new Headers(request.headers);
-		upstreamHeaders.delete("host");
-		upstreamHeaders.set("authorization", `Bearer ${token}`);
-
-		const upstreamResponse = await fetch(upstreamUrl.toString(), {
-			method: request.method,
-			headers: upstreamHeaders,
-			body: request.body,
-			// @ts-expect-error Cloudflare-specific: required to stream a request body through.
-			duplex: request.body ? "half" : undefined,
-		});
-
-		const contentType = upstreamResponse.headers.get("content-type") ?? "";
-		const isEventStream = contentType.includes("text/event-stream");
-		const body =
-			isEventStream && upstreamResponse.body
-				? upstreamResponse.body.pipeThrough(rewriteEndpointEvent(token))
-				: upstreamResponse.body;
-
-		return new Response(body, {
-			status: upstreamResponse.status,
-			headers: upstreamResponse.headers,
-		});
+	fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		return getProvider(request).fetch(request, env, ctx);
 	},
-} satisfies ExportedHandler;
+} satisfies ExportedHandler<Env>;

@@ -6,4 +6,17 @@
 	"observability": {
 		"enabled": true,
 	},
+	// Stores OAuth clients, grants, and tokens issued by
+	// @cloudflare/workers-oauth-provider. Created via the Cloudflare API;
+	// see README for the id.
+	"kv_namespaces": [
+		{
+			"binding": "OAUTH_KV",
+			"id": "dd6326ce06bb462d9ba58a86044eb362",
+		},
+	],
+	// CRAWL4AI_API_TOKEN is set as a secret (`wrangler secret put
+	// CRAWL4AI_API_TOKEN`), not here — same token value as the crawl4ai-mcp
+	// Cloud Run deployment's Secret Manager secret. It doubles as the
+	// passphrase this Worker's /authorize consent page checks against.
 }

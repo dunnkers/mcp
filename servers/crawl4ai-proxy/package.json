@@ -10,6 +10,9 @@
 		"test": "vitest run",
 		"check:types": "tsc --noEmit"
 	},
+	"dependencies": {
+		"@cloudflare/workers-oauth-provider": "^0.10.3"
+	},
 	"devDependencies": {
 		"@cloudflare/workers-types": "^5.20260902.1",
 		"typescript": "^7.0.2",
