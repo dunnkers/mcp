@@ -264,6 +264,10 @@ export async function bridgeMcpRequest(
 			signal: controller.signal,
 		});
 		if (!sseResponse.ok || !sseResponse.body) {
+			console.error("bridge: crawl4ai session open failed", {
+				status: sseResponse.status,
+				hasBody: !!sseResponse.body,
+			});
 			return jsonRpcError(requestId, -32000, `crawl4ai session open failed: ${sseResponse.status}`);
 		}
 		sessionReader = createSseSessionReader(sseResponse.body, controller.signal);
@@ -281,6 +285,10 @@ export async function bridgeMcpRequest(
 			signal: controller.signal,
 		});
 		if (!messagesResponse.ok) {
+			console.error("bridge: crawl4ai rejected the message", {
+				status: messagesResponse.status,
+				messagesPath,
+			});
 			return jsonRpcError(
 				requestId,
 				-32000,
@@ -300,8 +308,13 @@ export async function bridgeMcpRequest(
 		return Response.json(result);
 	} catch (error) {
 		if (controller.signal.aborted) {
+			console.error("bridge: timed out waiting for crawl4ai's response");
 			return jsonRpcError(requestId, -32000, "Timed out waiting for crawl4ai's response");
 		}
+		console.error("bridge: unexpected error", {
+			message: error instanceof Error ? error.message : String(error),
+			stack: error instanceof Error ? error.stack : undefined,
+		});
 		return jsonRpcError(requestId, -32000, error instanceof Error ? error.message : String(error));
 	} finally {
 		clearTimeout(timeout);
