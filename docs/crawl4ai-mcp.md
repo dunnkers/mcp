@@ -9,9 +9,14 @@ public image is deployed as-is, and this repo only owns the deploy config
 
 Unlike the other servers here (all Cloudflare Workers), Crawl4AI needs a real
 container with a headless Chromium, so it runs on Cloud Run instead. Deployed
-with `--min-instances=0` / `--max-instances=1`: cold starts are accepted
-(first request after idle pays browser boot time), and there is deliberately
-no cross-restart session/login persistence — every request is stateless. See
+with `--min-instances=0` (cold starts are accepted — first request after idle
+pays browser boot time) and `--max-instances=3` (raised from `1`: with only
+one instance, concurrent MCP sessions — e.g. a client retrying a connection
+attempt every few seconds — were all forced onto that single instance, and
+some never got serviced within any reasonable timeout; confirmed live via
+Cloud Run request logs showing SSE sessions sitting open with zero response
+until Cloud Run's own request timeout closed them). There is deliberately no
+cross-restart session/login persistence — every request is stateless. See
 the chat history / commit context for the reasoning if you need to revisit
 either tradeoff.
 
