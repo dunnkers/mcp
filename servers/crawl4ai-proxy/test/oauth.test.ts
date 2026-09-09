@@ -5,6 +5,7 @@ import {
 	encodeAuthRequest,
 	renderAuthorizePage,
 	tokensMatch,
+	upstreamPath,
 } from "../src/oauth-helpers.js";
 
 const SAMPLE_AUTH_REQUEST: AuthRequest = {
@@ -60,5 +61,20 @@ describe("renderAuthorizePage", () => {
 		});
 		expect(withoutError).not.toContain("Incorrect token.");
 		expect(withError).toContain("Incorrect token.");
+	});
+});
+
+describe("upstreamPath", () => {
+	it("rewrites the bare /mcp connector path to crawl4ai's real /mcp/sse endpoint", () => {
+		expect(upstreamPath("/mcp")).toBe("/mcp/sse");
+	});
+
+	it("passes through the SSE session's own follow-up messages path unchanged", () => {
+		expect(upstreamPath("/mcp/messages/")).toBe("/mcp/messages/");
+	});
+
+	it("leaves unrelated paths unchanged", () => {
+		expect(upstreamPath("/authorize")).toBe("/authorize");
+		expect(upstreamPath("/mcp/sse")).toBe("/mcp/sse");
 	});
 });
