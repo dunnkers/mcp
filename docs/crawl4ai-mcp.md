@@ -75,9 +75,11 @@ this in.
    Create Secret:
    - Name: `crawl4ai-api-token`
    - Secret value: the generated token
-   - After creating it, grant `crawl4ai-runtime` the `Secret Manager Secret
-     Accessor` role on this specific secret (Secret Manager → the secret →
-     Permissions → Grant Access).
+   - After creating it, grant both `crawl4ai-runtime` and `github-deployer`
+     the `Secret Manager Secret Accessor` role on this specific secret
+     (Secret Manager → the secret → Permissions → Grant Access) — the
+     deployer needs it too, since `gcloud run deploy` resolves the secret
+     reference at deploy time.
    - Save the token value somewhere safe (e.g. your password manager) — it's
      what you'll put in `Authorization: Bearer <token>` when calling the
      deployed service, same as the local Docker setup.
@@ -104,9 +106,10 @@ deploy time by reference (`--set-secrets`), so it never passes through CI.
 
 CI (`.github/workflows/deploy-crawl4ai-mcp.yml`) deploys on every push to
 `main` that touches the workflow file or this doc, or on demand via the
-Actions tab (`workflow_dispatch`) — use the manual trigger to redeploy after
-bumping the pinned image tag (`env.IMAGE` in the workflow) to a newer
-Crawl4AI release.
+Actions tab (`workflow_dispatch`). To redeploy after bumping the pinned
+image tag (`env.IMAGE` in the workflow) to a newer Crawl4AI release, just
+push the change to main — the `paths` filter matches the workflow file
+itself, so it triggers automatically.
 
 ## Connecting from Claude
 

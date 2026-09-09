@@ -18,8 +18,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Bump this to redeploy a newer Crawl4AI release; then run this workflow
-  # manually (workflow_dispatch) since the image tag alone doesn't trigger it.
+  # Bump this to redeploy a newer Crawl4AI release; pushing the change to
+  # main triggers this workflow automatically (the paths filter above
+  # matches this file).
   IMAGE: docker.io/unclecode/crawl4ai:0.9.3
   SERVICE: crawl4ai-mcp
 
@@ -54,7 +55,7 @@ jobs:
             --min-instances=0 \
             --max-instances=1 \
             --port=11235 \
-            --memory=2Gi \
+            --memory=4Gi \
             --cpu=2 \
             --timeout=300 \
             --service-account="$GCP_RUNTIME_SA_EMAIL" \
