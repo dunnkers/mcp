@@ -11,11 +11,12 @@ import {
 	encodeAuthRequest,
 	errorResponse,
 	htmlResponse,
+	MCP_PATH,
 	renderAuthorizePage,
 	tokensMatch,
+	upstreamPath,
 } from "./oauth-helpers.js";
 
-export const MCP_PATH = "/mcp";
 const TOKEN_PATH = "/token";
 const REGISTER_PATH = "/register";
 
@@ -111,7 +112,7 @@ async function handleAuthorizePost(
  */
 async function proxyToUpstream(request: Request, env: Env): Promise<Response> {
 	const url = new URL(request.url);
-	const upstreamUrl = new URL(url.pathname + url.search, env.UPSTREAM_ORIGIN);
+	const upstreamUrl = new URL(upstreamPath(url.pathname) + url.search, env.UPSTREAM_ORIGIN);
 
 	const upstreamHeaders = new Headers(request.headers);
 	upstreamHeaders.delete("host");
