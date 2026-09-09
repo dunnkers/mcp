@@ -1,0 +1,19 @@
+{
+	"name": "crawl4ai-proxy",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Auth-shape translation proxy in front of crawl4ai-mcp: takes a ?token= query param and forwards it upstream as a Bearer header, since claude.ai's SSE custom-connector UI doesn't actually send a manually configured Authorization header.",
+	"type": "module",
+	"scripts": {
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy",
+		"test": "vitest run",
+		"check:types": "tsc --noEmit"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^5.20260902.1",
+		"typescript": "^7.0.2",
+		"vitest": "^4.1.11",
+		"wrangler": "^4.128.0"
+	}
+}
