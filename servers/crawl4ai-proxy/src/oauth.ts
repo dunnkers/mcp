@@ -7,14 +7,15 @@ import {
 } from "@cloudflare/workers-oauth-provider";
 import {
 	AUTHORIZE_PATH,
+	bridgeMcpRequest,
 	decodeAuthRequest,
 	encodeAuthRequest,
 	errorResponse,
 	htmlResponse,
+	isMcpEntryPath,
 	MCP_PATH,
 	renderAuthorizePage,
 	tokensMatch,
-	upstreamPath,
 } from "./oauth-helpers.js";
 
 const TOKEN_PATH = "/token";
@@ -104,34 +105,17 @@ async function handleAuthorizePost(
 	}
 }
 
-/**
- * Forwards an already-OAuth-authenticated request to the real crawl4ai
- * service, swapping in the real `CRAWL4AI_API_TOKEN` as the Bearer header.
- * claude.ai never sees this token — it only ever holds the OAuth access
- * token this provider issued.
- */
-async function proxyToUpstream(request: Request, env: Env): Promise<Response> {
-	const url = new URL(request.url);
-	const upstreamUrl = new URL(upstreamPath(url.pathname) + url.search, env.UPSTREAM_ORIGIN);
-
-	const upstreamHeaders = new Headers(request.headers);
-	upstreamHeaders.delete("host");
-	upstreamHeaders.set("authorization", `Bearer ${env.CRAWL4AI_API_TOKEN}`);
-
-	return fetch(upstreamUrl.toString(), {
-		method: request.method,
-		headers: upstreamHeaders,
-		body: request.body,
-		// @ts-expect-error Cloudflare-specific: required to stream a request body through.
-		duplex: request.body ? "half" : undefined,
-	});
-}
-
 export function createOAuthProvider(resourceUrl: string) {
 	return new OAuthProvider({
 		apiRoute: MCP_PATH,
 		apiHandler: {
-			fetch: (request: Request, env: Env) => proxyToUpstream(request, env),
+			fetch: (request: Request, env: Env) => {
+				const pathname = new URL(request.url).pathname;
+				if (request.method === "POST" && isMcpEntryPath(pathname)) {
+					return bridgeMcpRequest(request, env.UPSTREAM_ORIGIN, env.CRAWL4AI_API_TOKEN);
+				}
+				return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
+			},
 		},
 		defaultHandler: {
 			// Declared as plain `Env` to match what the library's own
