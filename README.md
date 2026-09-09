@@ -25,3 +25,8 @@ Jeroen's MCP servers.
   Worker-native Bark-Server reimplementation with a built-in MCP endpoint,
   deployed as a Cloudflare Worker backed by D1. See
   [docs/bark-worker.md](docs/bark-worker.md) for setup and deploy details.
+- `crawl4ai-mcp` — the official [`unclecode/crawl4ai`](https://hub.docker.com/r/unclecode/crawl4ai)
+  Docker image (web crawling/scraping, with a built-in MCP endpoint),
+  deployed as-is to Cloud Run. No vendored source — this repo only owns the
+  deploy config. See [docs/crawl4ai-mcp.md](docs/crawl4ai-mcp.md) for setup
+  and deploy details.
