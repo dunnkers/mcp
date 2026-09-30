@@ -9,10 +9,12 @@ import {
     isAllowedRedirectUri,
     isMcpPath,
     isOAuthPath,
+    isProtectedMcpRequest,
     isUsableAuthToken,
     mcpPathFor,
     parseAllowedRedirectHosts,
     renderAuthorizePage,
+    routedPathname,
     tokensMatch,
 } from '../src/oauth-helpers.js'
 
@@ -36,6 +38,23 @@ test('routes /mcp and /mcp/<device_key> to OAuth, but not Bark device keys start
     assert.equal(isMcpPath('/mcp/device-key', '/mcp'), true)
     assert.equal(isMcpPath('/mcpDeviceKey/hello', '/mcp'), false)
     assert.equal(isMcpPath('/device-key/mcp', '/mcp'), false)
+})
+
+test('gates every path main.js would serve as MCP, including a bare /mcp under a custom ROOT_PATH', () => {
+    // main.js strips ROOT_PATH when present but doesn't require it.
+    assert.equal(routedPathname('/bark/mcp', '/bark/'), '/mcp')
+    assert.equal(routedPathname('/mcp', '/bark/'), '/mcp')
+
+    for (const rootPath of ['/', '/bark/', undefined]) {
+        assert.equal(isProtectedMcpRequest('/mcp', rootPath), true, `bare /mcp, ROOT_PATH=${rootPath}`)
+        assert.equal(isProtectedMcpRequest('/mcp/device-key', rootPath), true)
+    }
+    assert.equal(isProtectedMcpRequest('/bark/mcp', '/bark/'), true)
+    assert.equal(isProtectedMcpRequest('/bark/mcp/device-key', '/bark/'), true)
+
+    assert.equal(isProtectedMcpRequest('/bark/push', '/bark/'), false)
+    assert.equal(isProtectedMcpRequest('/push', '/'), false)
+    assert.equal(isProtectedMcpRequest('/mcpDeviceKey/hello', '/'), false)
 })
 
 test('routes discovery and OAuth endpoints, but not Bark\'s own /register', () => {

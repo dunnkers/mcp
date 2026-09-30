@@ -12,7 +12,7 @@
 //   Bark always has — by device key, plus optional BASIC_AUTH.
 import { checkRateLimit, handleRequest } from '../main.js'
 import { createOAuthProvider } from './oauth.js'
-import { errorResponse, isMcpPath, isOAuthPath, mcpPathFor } from './oauth-helpers.js'
+import { errorResponse, isOAuthPath, isProtectedMcpRequest, mcpPathFor } from './oauth-helpers.js'
 
 let cached = null
 
@@ -41,10 +41,14 @@ export default {
         if (limited) return limited
 
         const url = new URL(request.url)
-        const mcpPath = mcpPathFor(env.ROOT_PATH)
-        if (!isMcpPath(url.pathname, mcpPath) && !isOAuthPath(url.pathname)) {
+        // Decided on the path main.js routes on, not the raw one: it serves
+        // MCP at both `${ROOT_PATH}mcp` and a bare `/mcp`. Only the former is
+        // the provider's apiRoute; the latter falls through to its default
+        // handler and gets a 404, so neither reaches main.js unauthenticated.
+        if (!isProtectedMcpRequest(url.pathname, env.ROOT_PATH) && !isOAuthPath(url.pathname)) {
             return handleRequest(request, env, ctx)
         }
+        const mcpPath = mcpPathFor(env.ROOT_PATH)
         // Fail closed: without the KV binding there's no way to validate a
         // token, and the MCP endpoint must never fall back to being open.
         if (!env.OAUTH_KV) {

@@ -38,6 +38,23 @@ export function isMcpPath(pathname, mcpPath) {
     return pathname === mcpPath || pathname.startsWith(`${mcpPath}/`)
 }
 
+/**
+ * The path main.js's handleRequest actually routes on: it strips ROOT_PATH
+ * when present but doesn't require it, so with ROOT_PATH=/bark/ both
+ * `/bark/mcp` and a bare `/mcp` reach its MCP handler. Mirrors that logic
+ * exactly, so the OAuth gate covers every path the upstream server would
+ * treat as MCP.
+ */
+export function routedPathname(pathname, rootPath) {
+    const root = rootPath || '/'
+    return pathname.replace(new RegExp('^' + root.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')), '/')
+}
+
+/** Whether a request must pass the OAuth gate before reaching main.js. */
+export function isProtectedMcpRequest(pathname, rootPath) {
+    return isMcpPath(routedPathname(pathname, rootPath), '/mcp')
+}
+
 /** Discovery metadata and the OAuth endpoints, all served by the provider. */
 export function isOAuthPath(pathname) {
     return pathname.startsWith('/.well-known/oauth-') || pathname.startsWith('/oauth/')
