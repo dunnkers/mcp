@@ -6,7 +6,7 @@
 // volumetric abuse protection, independent of the OAuth gate in oauth.ts —
 // a client with a *valid* token could still hammer the Worker. The actual
 // limit (60 requests/60s) is configured on the binding itself, in
-// wrangler.jsonc's `unsafe.bindings[].simple`, not here.
+// wrangler.jsonc's `ratelimits[].simple`, not here.
 const RETRY_AFTER_SECONDS = 60;
 
 export interface RateLimitedEnv {

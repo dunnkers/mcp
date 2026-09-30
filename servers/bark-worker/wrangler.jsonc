@@ -1,9 +1,14 @@
 {
     "name": "bark-worker",
-    "main": "main.js",
+    // src/worker.js wraps the upstream main.js with OAuth for the MCP endpoint.
+    "main": "src/worker.js",
     "compatibility_date": "2026-03-01",
+    // global_fetch_strictly_public: required by the OAuth provider for CIMD
+    // (claude.ai identifies itself with a client metadata URL), and keeps
+    // Worker fetches from reaching private addresses.
     "compatibility_flags": [
-        "nodejs_compat"
+        "nodejs_compat",
+        "global_fetch_strictly_public"
     ],
     "observability": {
         "enabled": true
@@ -15,6 +20,18 @@
             "database_id": "b0b069ad-f7de-4054-9141-3e3a68faeeb7"
         }
     ],
+    // Stores OAuth clients, grants, and tokens issued by
+    // @cloudflare/workers-oauth-provider for /mcp. The real namespace id is
+    // account-specific and isn't committed here (this is a public repo) — the
+    // deploy workflow substitutes it before running `wrangler deploy`, same as
+    // marktplaats-mcp and vinted-mcp. AUTH_TOKEN (the consent-page password)
+    // is a secret: `wrangler secret put AUTH_TOKEN`.
+    "kv_namespaces": [
+        {
+            "binding": "OAUTH_KV",
+            "id": "00000000000000000000000000000000"
+        }
+    ],
     "keep_vars": true,
     "vars": {
         "ALLOW_NEW_DEVICE": "true",
@@ -22,18 +39,15 @@
         "ROOT_PATH": "/",
         // "BASIC_AUTH": ""
     },
-    // Volumetric abuse protection, checked before Basic Auth or any D1 work
-    // runs (see the checkRateLimit function in main.js/main_kv.js).
-    // `namespace_id` here is just a local identifier for this binding within
-    // this Worker script, not a real resource to provision.
-    "unsafe": {
-        "bindings": [
-            {
-                "name": "RATE_LIMITER",
-                "type": "ratelimit",
-                "namespace_id": "1001",
-                "simple": { "limit": 60, "period": 60 }
-            }
-        ]
-    }
+    // Volumetric abuse protection, checked before auth or any real work runs.
+    // Rate-limit namespace ids are account-wide: Workers that share an id share
+    // counters, so each Worker in this repo uses its own (bark-worker 1001,
+    // marktplaats-mcp 1002, vinted-mcp 1003). Not a resource to provision.
+    "ratelimits": [
+        {
+            "name": "RATE_LIMITER",
+            "namespace_id": "1001",
+            "simple": { "limit": 60, "period": 60 }
+        }
+    ]
 }

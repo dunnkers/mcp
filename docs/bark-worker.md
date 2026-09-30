@@ -51,9 +51,26 @@ Once deployed, add it as a **custom connector**:
 
 1. claude.ai → Settings → Connectors → Add custom connector.
 2. URL: `https://<worker-name>.<your-subdomain>.workers.dev/mcp`
-3. Click Connect. The Worker's default config (`wrangler.jsonc`) doesn't
-   set `BASIC_AUTH`, so no authorization step is needed — set it (and
-   redeploy) if you want the `/mcp` and REST endpoints protected.
+3. Click Connect. You're sent to the Worker's consent page at
+   `/oauth/authorize`; enter the `AUTH_TOKEN` once.
+
+`/mcp` is gated by OAuth ([auth.md](auth.md)). This repo's
+`src/worker.js` wraps the upstream `main.js` with an OAuth provider and
+changes nothing else upstream beyond one `export` line, so `git subtree pull`
+stays easy. The OAuth endpoints live under `/oauth/` because Bark's REST API
+already owns `/register`, which is the iOS app's device registration.
+
+Bark's REST API (`/register`, `/push`, `/<device_key>/...`, `/ping`, ...)
+works exactly as before, because the iOS app and push senders depend on it.
+The device key is the credential there, and the optional `BASIC_AUTH` var
+still applies to those routes. It no longer applies to `/mcp`, which uses
+OAuth instead.
+
+Setup needs the OAuth KV namespace and a consent password
+([auth.md](auth.md#setup-for-a-shared-password-worker)); run
+`openssl rand -hex 32 | npx wrangler secret put AUTH_TOKEN` from
+`servers/bark-worker`. Existing Bark connectors have to be removed and
+re-added once, to go through the OAuth flow.
 
 The generic `/mcp` endpoint requires a `device_key` argument on every
 `notify` call; `/mcp/:device_key` (device-specific) omits that requirement

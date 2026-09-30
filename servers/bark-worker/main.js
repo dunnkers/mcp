@@ -11,7 +11,7 @@ export default {
 // every hit. This is volumetric abuse protection, independent of Basic Auth
 // — a client with valid credentials (or a device key, which needs none)
 // could still hammer the Worker. The actual limit is configured on the
-// binding itself, in wrangler.jsonc's `unsafe.bindings[].simple`.
+// binding itself, in wrangler.jsonc's `ratelimits[].simple`.
 //
 // RATE_LIMITER is undefined in local test doubles that construct `env` by
 // hand (see test/push-compatibility.test.js) — treated as "not limited"
@@ -1092,3 +1092,6 @@ class Util {
 }
 
 const util = new Util()
+
+// Used by src/worker.js, which wraps this server with OAuth for /mcp.
+export { checkRateLimit, handleRequest }

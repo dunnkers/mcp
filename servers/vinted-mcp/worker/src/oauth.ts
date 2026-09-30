@@ -7,11 +7,16 @@ import {
 } from "@cloudflare/workers-oauth-provider";
 import {
 	AUTHORIZE_PATH,
+	authRequestProblem,
 	decodeAuthRequest,
 	encodeAuthRequest,
 	errorResponse,
 	htmlResponse,
+	isUsableAuthToken,
 	MCP_PATH,
+	MIN_AUTH_TOKEN_LENGTH,
+	parseAllowedRedirectHosts,
+	redirectHostForDisplay,
 	renderAuthorizePage,
 	tokensMatch,
 } from "./oauth-helpers.js";
@@ -28,13 +33,26 @@ const REGISTER_PATH = "/register";
 const ACCESS_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 
+// The single user every grant is issued to. Must be unique per Worker: the
+// OAuth KV namespace is shared with this repo's other Workers, grants live
+// under `grant:<userId>:`, and completeAuthorization revokes the user's
+// existing grants for the same client — and claude.ai uses one client id for
+// every connector. A shared userId would make connecting one server silently
+// disconnect the others.
+const GRANT_USER_ID = "vinted-mcp-owner";
+
 export interface Env {
 	OAUTH_KV: KVNamespace;
 	// Gates the /authorize consent form. This Worker's vendored client bootstraps
 	// its own Vinted session per request (see mcp-handler.ts / ../README.md); this
 	// token exists purely to control who can mint an OAuth grant against this
-	// Worker. Set via `wrangler secret put AUTH_TOKEN`.
-	AUTH_TOKEN: string;
+	// Worker. Set
+	// via `wrangler secret put AUTH_TOKEN`; must be at least
+	// MIN_AUTH_TOKEN_LENGTH characters or /authorize refuses to run.
+	AUTH_TOKEN?: string;
+	// Optional comma-separated override of the hosts /authorize may redirect
+	// back to (loopback is always allowed). See DEFAULT_ALLOWED_REDIRECT_HOSTS.
+	ALLOWED_REDIRECT_HOSTS?: string;
 	// Volumetric abuse protection, checked in index.ts before this provider
 	// ever sees the request. See rate-limit.ts.
 	RATE_LIMITER: RateLimit;
@@ -44,18 +62,37 @@ interface OAuthProviderEnv extends Env {
 	OAUTH_PROVIDER: OAuthHelpers;
 }
 
-async function handleAuthorizeGet(request: Request, helpers: OAuthHelpers): Promise<Response> {
+function misconfiguredResponse(): Response {
+	console.error({
+		event: "oauth.misconfigured",
+		reason: `AUTH_TOKEN is unset or shorter than ${MIN_AUTH_TOKEN_LENGTH} characters`,
+	});
+	return errorResponse("This server's authorization is not configured.", 503);
+}
+
+async function handleAuthorizeGet(
+	request: Request,
+	env: Env,
+	helpers: OAuthHelpers,
+): Promise<Response> {
+	if (!isUsableAuthToken(env.AUTH_TOKEN)) return misconfiguredResponse();
 	let authRequest: AuthRequest;
 	try {
 		authRequest = await helpers.parseAuthRequest(request);
 	} catch {
 		return errorResponse("Invalid authorization request.", 400);
 	}
+	const problem = authRequestProblem(
+		authRequest,
+		parseAllowedRedirectHosts(env.ALLOWED_REDIRECT_HOSTS),
+	);
+	if (problem) return errorResponse(problem, 400);
 	const client = await helpers.lookupClient(authRequest.clientId);
 	if (!client) return errorResponse("Unknown OAuth client.", 400);
 	return htmlResponse(
 		renderAuthorizePage({
 			clientName: client.clientName?.trim() || client.clientId,
+			redirectHost: redirectHostForDisplay(authRequest.redirectUri),
 			encodedRequest: encodeAuthRequest(authRequest),
 		}),
 	);
@@ -66,6 +103,8 @@ async function handleAuthorizePost(
 	env: Env,
 	helpers: OAuthHelpers,
 ): Promise<Response> {
+	const authToken = env.AUTH_TOKEN;
+	if (!isUsableAuthToken(authToken)) return misconfiguredResponse();
 	let form: FormData;
 	try {
 		form = await request.formData();
@@ -76,27 +115,37 @@ async function handleAuthorizePost(
 	const authRequest =
 		typeof encodedRequest === "string" ? decodeAuthRequest(encodedRequest) : null;
 	if (!authRequest) return errorResponse("Invalid authorization request.", 400);
+	const problem = authRequestProblem(
+		authRequest,
+		parseAllowedRedirectHosts(env.ALLOWED_REDIRECT_HOSTS),
+	);
+	if (problem) return errorResponse(problem, 400);
 
 	const client = await helpers.lookupClient(authRequest.clientId);
 	if (!client) return errorResponse("Unknown OAuth client.", 400);
 	const clientName = client.clientName?.trim() || client.clientId;
 	const rerender = (error: string, status: number): Response =>
 		htmlResponse(
-			renderAuthorizePage({ clientName, encodedRequest: encodedRequest as string, error }),
+			renderAuthorizePage({
+				clientName,
+				redirectHost: redirectHostForDisplay(authRequest.redirectUri),
+				encodedRequest: encodedRequest as string,
+				error,
+			}),
 			status,
 		);
 
 	const submitted = form.get("token");
 	const token = typeof submitted === "string" ? submitted.trim() : "";
 	if (!token) return rerender("Enter the access token.", 400);
-	if (!(await tokensMatch(token, env.AUTH_TOKEN))) {
+	if (!(await tokensMatch(token, authToken))) {
 		return rerender("Incorrect token.", 401);
 	}
 
 	try {
 		const { redirectTo } = await helpers.completeAuthorization({
 			request: authRequest,
-			userId: "jeroen",
+			userId: GRANT_USER_ID,
 			metadata: {},
 			scope: authRequest.scope,
 			props: {},
@@ -134,7 +183,7 @@ export function createOAuthProvider(
 				const helpers = (env as OAuthProviderEnv).OAUTH_PROVIDER;
 				const url = new URL(request.url);
 				if (url.pathname === AUTHORIZE_PATH) {
-					if (request.method === "GET") return handleAuthorizeGet(request, helpers);
+					if (request.method === "GET") return handleAuthorizeGet(request, env, helpers);
 					if (request.method === "POST") return handleAuthorizePost(request, env, helpers);
 					return new Response("Method not allowed", {
 						status: 405,
