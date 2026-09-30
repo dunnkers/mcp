@@ -16,7 +16,7 @@ search/listing endpoints, and returns the result.
 
 `/mcp` is protected by a real OAuth 2.1 flow, built on
 [`@cloudflare/workers-oauth-provider`](https://www.npmjs.com/package/@cloudflare/workers-oauth-provider)
-(the same library `hevy-mcp` and `crawl4ai-proxy` already use in this
+(the same library `hevy-mcp` and `vinted-mcp` already use in this
 account). This Worker's `*.workers.dev` URL is public — it's printed in
 deploy logs and derivable from the repo — so anonymous access has to be
 denied at the edge rather than relying on the URL being secret. A client
@@ -29,13 +29,13 @@ Marktplaats request) ever runs.
 
 ### Setup
 
-1. Reuse the account's existing OAuth KV namespace (same one `crawl4ai-proxy`
-   and `hevy-mcp` use) — `wrangler.jsonc` commits a placeholder id
+1. Reuse the account's existing OAuth KV namespace (same one `hevy-mcp`
+   and `vinted-mcp` use) — `wrangler.jsonc` commits a placeholder id
    (`00000000000000000000000000000000`); the deploy workflow substitutes the
    real id from the `CLOUDFLARE_OAUTH_KV_NAMESPACE_ID` repository secret
    before running `wrangler deploy`. To deploy manually instead, substitute it
-   yourself and restore the placeholder afterward (see crawl4ai-proxy's
-   README for the exact `sed`/`git checkout` steps).
+   yourself and restore the placeholder afterward (run the same `sed`
+   the deploy workflow does, then `git checkout wrangler.jsonc`).
 2. Set the consent-page password:
    ```bash
    npx wrangler secret put AUTH_TOKEN

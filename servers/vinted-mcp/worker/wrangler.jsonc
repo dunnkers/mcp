@@ -12,7 +12,7 @@
 	// account-specific and isn't committed here (this is a public repo) —
 	// the deploy workflow substitutes it from the CLOUDFLARE_OAUTH_KV_NAMESPACE_ID
 	// repository secret before running `wrangler deploy`, same pattern as
-	// crawl4ai-proxy's and marktplaats-mcp's wrangler.jsonc in this repo.
+	// marktplaats-mcp's wrangler.jsonc in this repo.
 	"kv_namespaces": [
 		{
 			"binding": "OAUTH_KV",

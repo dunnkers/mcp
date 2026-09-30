@@ -10,8 +10,8 @@
 	// @cloudflare/workers-oauth-provider. The real namespace id is
 	// account-specific and isn't committed here (this is a public repo) —
 	// the deploy workflow substitutes it from the CLOUDFLARE_OAUTH_KV_NAMESPACE_ID
-	// repository secret before running `wrangler deploy`, same pattern as
-	// crawl4ai-proxy's wrangler.jsonc in this repo. See README for local dev.
+	// repository secret before running `wrangler deploy`. See README for
+	// local dev.
 	"kv_namespaces": [
 		{
 			"binding": "OAUTH_KV",
