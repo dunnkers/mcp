@@ -5,8 +5,7 @@ import { handleMcpRequest } from "../src/mcp-handler.js";
 // @cloudflare/workers-oauth-provider: every /mcp request must carry a valid
 // OAuth access token, checked against KV before handleMcpRequest ever runs.
 // Exercising that end-to-end would mean faking KV and a full authorize/token
-// exchange, which crawl4ai-proxy's test suite (the pattern this follows)
-// doesn't do either — instead it tests the pure oauth-helpers.ts functions
+// exchange; instead this suite tests the pure oauth-helpers.ts functions
 // (see oauth-helpers.test.ts) and the actual MCP protocol logic directly
 // against the exported request handler, bypassing the OAuth wrapper.
 async function callMcp(body: unknown) {

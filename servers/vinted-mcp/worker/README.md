@@ -36,7 +36,7 @@ to the vendored root, so `import { createServer } from
 
 `/mcp` is protected by a real OAuth 2.1 flow, built on
 [`@cloudflare/workers-oauth-provider`](https://www.npmjs.com/package/@cloudflare/workers-oauth-provider)
-(the same library `hevy-mcp`, `crawl4ai-proxy`, and `marktplaats-mcp` already
+(the same library `hevy-mcp` and `marktplaats-mcp` already
 use in this account). This Worker's `*.workers.dev` URL is public — it's
 printed in deploy logs and derivable from the repo — so anonymous access has
 to be denied at the edge rather than relying on the URL being secret. A
@@ -49,8 +49,8 @@ Vinted request) ever runs.
 
 ### Setup
 
-1. Reuse the account's existing OAuth KV namespace (same one `crawl4ai-proxy`,
-   `hevy-mcp`, and `marktplaats-mcp` use) — `wrangler.jsonc` commits a
+1. Reuse the account's existing OAuth KV namespace (same one
+   `hevy-mcp` and `marktplaats-mcp` use) — `wrangler.jsonc` commits a
    placeholder id (`00000000000000000000000000000000`); the deploy workflow
    substitutes the real id from the `CLOUDFLARE_OAUTH_KV_NAMESPACE_ID`
    repository secret before running `wrangler deploy`.

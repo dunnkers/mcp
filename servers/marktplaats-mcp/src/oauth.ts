@@ -22,8 +22,8 @@ const REGISTER_PATH = "/register";
 // One-hour access tokens would make claude.ai refresh several times a day,
 // and every refresh writes to KV. This is a single-user personal deployment,
 // so a long-lived session is fine and keeps well under KV's free-plan write
-// quota (same reasoning as crawl4ai-proxy's oauth.ts and hevy-mcp's
-// worker-oauth.ts in this repo, which run the same library against the same
+// quota (same reasoning as hevy-mcp's worker-oauth.ts in this repo,
+// which runs the same library against the same
 // Cloudflare account).
 const ACCESS_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -172,8 +172,8 @@ export function createOAuthProvider(
 		// this stub must be present for claude.ai's custom connector to
 		// complete authorization at all — trustedIssuers never trusts an
 		// issuer, since this server has no real enterprise SSO to offer.
-		// (Same gotcha, same fix, as crawl4ai-proxy's oauth.ts and hevy-mcp's
-		// worker-oauth.ts in this repo.)
+		// (Same gotcha, same fix, as hevy-mcp's worker-oauth.ts in this
+		// repo.)
 		enterpriseManagedAuthorization: {
 			trustedIssuers: async () => null,
 			mapClaims: async () => {

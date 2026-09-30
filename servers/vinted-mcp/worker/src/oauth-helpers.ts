@@ -1,8 +1,7 @@
 // Pure logic used by oauth.ts, split out so tests can import it without
 // pulling in @cloudflare/workers-oauth-provider's runtime (which requires
 // the `cloudflare:workers` module and can't load under plain Node/vitest).
-// Mirrors servers/crawl4ai-proxy/src/oauth-helpers.ts and
-// servers/marktplaats-mcp/src/oauth-helpers.ts in this repo.
+// Mirrors servers/marktplaats-mcp/src/oauth-helpers.ts in this repo.
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 
 export const AUTHORIZE_PATH = "/authorize";
