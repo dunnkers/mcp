@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
-import worker from "../src/index";
+import { handleMcpRequest } from "../src/mcp-handler";
 
+// The Worker's HTTP entry point (`fetch` in src/index.ts) is now wrapped by
+// @cloudflare/workers-oauth-provider: every /mcp request must carry a valid
+// OAuth access token, checked against KV before handleMcpRequest ever runs.
+// Exercising that end-to-end would mean faking KV and a full authorize/token
+// exchange, which crawl4ai-proxy's and marktplaats-mcp's test suites (the
+// pattern this follows) don't do either — instead they test the pure
+// oauth-helpers.ts functions (see oauth-helpers.test.ts) and the actual MCP
+// protocol logic directly against the exported request handler, bypassing
+// the OAuth wrapper.
 async function callMcp(body: unknown) {
 	const request = new Request("https://example.com/mcp", {
 		method: "POST",
@@ -10,41 +19,10 @@ async function callMcp(body: unknown) {
 		},
 		body: JSON.stringify(body),
 	});
-	return worker.fetch(request, {} as never, {} as never);
+	return handleMcpRequest(request);
 }
 
-describe("vinted-mcp worker fetch handler", () => {
-	it("serves a root info document", async () => {
-		const response = await worker.fetch(
-			new Request("https://example.com/"),
-			{} as never,
-			{} as never,
-		);
-		expect(response.status).toBe(200);
-		const body = await response.json();
-		expect(body).toMatchObject({ name: "vinted-mcp", mcp_endpoint: "/mcp" });
-	});
-
-	it("returns 404 for unknown paths", async () => {
-		const response = await worker.fetch(
-			new Request("https://example.com/nope"),
-			{} as never,
-			{} as never,
-		);
-		expect(response.status).toBe(404);
-	});
-
-	it("rejects GET and DELETE on /mcp", async () => {
-		for (const method of ["GET", "DELETE"]) {
-			const response = await worker.fetch(
-				new Request("https://example.com/mcp", { method }),
-				{} as never,
-				{} as never,
-			);
-			expect(response.status).toBe(405);
-		}
-	});
-
+describe("handleMcpRequest", () => {
 	it("lists all vendored tools via the MCP protocol", async () => {
 		const response = await callMcp({ jsonrpc: "2.0", id: 1, method: "tools/list" });
 		expect(response.status).toBe(200);

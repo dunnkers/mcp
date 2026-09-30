@@ -29,4 +29,20 @@
 	// CRAWL4AI_API_TOKEN`), not here — same token value as the crawl4ai-mcp
 	// Cloud Run deployment's Secret Manager secret. It doubles as the
 	// passphrase this Worker's /authorize consent page checks against.
+	//
+	// Volumetric abuse protection (see src/rate-limit.ts), checked before
+	// OAuth or any real work runs. `namespace_id` here is just a local
+	// identifier for this binding within this Worker script — unlike the KV
+	// namespace above, it isn't a real resource to provision, so the
+	// placeholder value is fine to commit as-is.
+	"unsafe": {
+		"bindings": [
+			{
+				"name": "RATE_LIMITER",
+				"type": "ratelimit",
+				"namespace_id": "1001",
+				"simple": { "limit": 60, "period": 60 },
+			},
+		],
+	},
 }

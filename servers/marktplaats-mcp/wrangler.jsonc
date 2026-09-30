@@ -6,4 +6,34 @@
 	"observability": {
 		"enabled": true,
 	},
+	// Stores OAuth clients, grants, and tokens issued by
+	// @cloudflare/workers-oauth-provider. The real namespace id is
+	// account-specific and isn't committed here (this is a public repo) —
+	// the deploy workflow substitutes it from the CLOUDFLARE_OAUTH_KV_NAMESPACE_ID
+	// repository secret before running `wrangler deploy`, same pattern as
+	// crawl4ai-proxy's wrangler.jsonc in this repo. See README for local dev.
+	"kv_namespaces": [
+		{
+			"binding": "OAUTH_KV",
+			"id": "00000000000000000000000000000000",
+		},
+	],
+	// AUTH_TOKEN (the /authorize consent-page password) is set as a secret
+	// (`wrangler secret put AUTH_TOKEN`), not here.
+	//
+	// Volumetric abuse protection (see src/rate-limit.ts), checked before
+	// OAuth or any real work runs. `namespace_id` here is just a local
+	// identifier for this binding within this Worker script — unlike the KV
+	// namespace above, it isn't a real resource to provision, so the
+	// placeholder value is fine to commit as-is.
+	"unsafe": {
+		"bindings": [
+			{
+				"name": "RATE_LIMITER",
+				"type": "ratelimit",
+				"namespace_id": "1001",
+				"simple": { "limit": 60, "period": 60 },
+			},
+		],
+	},
 }

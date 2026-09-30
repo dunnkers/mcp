@@ -1,7 +1,32 @@
 export default {
     async fetch(request, env, ctx) {
+        const limited = await checkRateLimit(request, env)
+        if (limited) return limited
         return await handleRequest(request, env, ctx)
     }
+}
+
+// Checked first thing above, before Basic Auth or any database work, so a
+// flood of requests gets a cheap 429 instead of paying for a D1 lookup on
+// every hit. This is volumetric abuse protection, independent of Basic Auth
+// — a client with valid credentials (or a device key, which needs none)
+// could still hammer the Worker. The actual limit is configured on the
+// binding itself, in wrangler.jsonc's `unsafe.bindings[].simple`.
+//
+// RATE_LIMITER is undefined in local test doubles that construct `env` by
+// hand (see test/push-compatibility.test.js) — treated as "not limited"
+// rather than throwing, so those tests don't need to know about it. Kept
+// self-contained (no imports) so this file stays copy-pasteable into the
+// Cloudflare dashboard editor, per doc/setup_guide.md.
+async function checkRateLimit(request, env) {
+    if (!env.RATE_LIMITER) return null
+    const key = request.headers.get('cf-connecting-ip') || 'unknown'
+    const { success } = await env.RATE_LIMITER.limit({ key })
+    if (success) return null
+    return new Response(null, {
+        status: 429,
+        headers: { 'Retry-After': '60' },
+    })
 }
 
 async function handleRequest(request, env, ctx) {

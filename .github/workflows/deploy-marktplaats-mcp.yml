@@ -64,6 +64,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Substitute the real KV namespace id
+        env:
+          KV_NAMESPACE_ID: ${{ secrets.CLOUDFLARE_OAUTH_KV_NAMESPACE_ID }}
+        run: |
+          sed -i "s/00000000000000000000000000000000/${KV_NAMESPACE_ID}/" wrangler.jsonc
+
       - name: Deploy Worker
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

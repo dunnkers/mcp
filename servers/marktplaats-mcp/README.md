@@ -8,9 +8,40 @@ Cloudflare Worker. It's a from-scratch TypeScript port of the
 stdio process, so it has effectively no idle cost and no local Python
 dependency to install.
 
-It's stateless and read-only: no API key, no auth, no per-user state. Every
+It's stateless and read-only: no per-user state, no upstream API key. Every
 request creates a fresh in-memory MCP server, calls the public Marktplaats
 search/listing endpoints, and returns the result.
+
+## Auth
+
+`/mcp` is protected by a real OAuth 2.1 flow, built on
+[`@cloudflare/workers-oauth-provider`](https://www.npmjs.com/package/@cloudflare/workers-oauth-provider)
+(the same library `hevy-mcp` and `crawl4ai-proxy` already use in this
+account). This Worker's `*.workers.dev` URL is public — it's printed in
+deploy logs and derivable from the repo — so anonymous access has to be
+denied at the edge rather than relying on the URL being secret. A client
+(claude.ai's custom-connector UI, or any other OAuth-aware MCP client)
+discovers the Worker via the standard `.well-known` endpoints, is redirected
+to `/authorize` to enter the `AUTH_TOKEN` once, and from then on authenticates
+with its own OAuth access token — never the shared token itself. Requests to
+`/mcp` without a valid token are rejected before the MCP server (or any
+Marktplaats request) ever runs.
+
+### Setup
+
+1. Reuse the account's existing OAuth KV namespace (same one `crawl4ai-proxy`
+   and `hevy-mcp` use) — `wrangler.jsonc` commits a placeholder id
+   (`00000000000000000000000000000000`); the deploy workflow substitutes the
+   real id from the `CLOUDFLARE_OAUTH_KV_NAMESPACE_ID` repository secret
+   before running `wrangler deploy`. To deploy manually instead, substitute it
+   yourself and restore the placeholder afterward (see crawl4ai-proxy's
+   README for the exact `sed`/`git checkout` steps).
+2. Set the consent-page password:
+   ```bash
+   npx wrangler secret put AUTH_TOKEN
+   ```
+3. Deploy: `npm run deploy` (or push to `main` — see
+   `.github/workflows/deploy-marktplaats-mcp.yml`).
 
 ## Tools
 
@@ -50,9 +81,13 @@ npm run deploy      # wrangler deploy
   `lrp/api/search` and `v/api/seller-profile` endpoints directly.
 - `server.ts` — registers the tools on an `@modelcontextprotocol/sdk`
   `McpServer` with zod input schemas.
-- `index.ts` — the Worker's `fetch` handler: mounts the MCP server at `/mcp`
-  using the SDK's `WebStandardStreamableHTTPServerTransport` in stateless,
-  JSON-response mode (no Durable Objects, no session state).
+- `mcp-handler.ts` — mounts the MCP server on a single request using the
+  SDK's `WebStandardStreamableHTTPServerTransport` in stateless, JSON-response
+  mode (no Durable Objects, no session state).
+- `oauth-helpers.ts` / `oauth.ts` — the OAuth 2.1 authorization server (see
+  [Auth](#auth) below) that gates access to `mcp-handler.ts`.
+- `index.ts` — the Worker's `fetch` handler: wires the OAuth provider up,
+  routing authorized `/mcp` requests to `mcp-handler.ts`.
 
 See [`docs/marktplaats-mcp.md`](../../docs/marktplaats-mcp.md) at the repo
 root for deployment and connector setup.

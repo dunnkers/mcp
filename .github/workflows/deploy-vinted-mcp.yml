@@ -72,6 +72,13 @@ jobs:
         working-directory: servers/vinted-mcp/worker
         run: npm ci
 
+      - name: Substitute the real KV namespace id
+        working-directory: servers/vinted-mcp/worker
+        env:
+          KV_NAMESPACE_ID: ${{ secrets.CLOUDFLARE_OAUTH_KV_NAMESPACE_ID }}
+        run: |
+          sed -i "s/00000000000000000000000000000000/${KV_NAMESPACE_ID}/" wrangler.jsonc
+
       - name: Deploy Worker
         working-directory: servers/vinted-mcp/worker
         env:

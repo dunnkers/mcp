@@ -1,6 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import { createOAuthProvider, type Env } from "./oauth.js";
+import { checkRateLimit } from "./rate-limit.js";
 
 /**
  * Lazily builds (and memoizes per canonical origin) the OAuth provider.
@@ -23,7 +24,11 @@ function createProviderGetter() {
 const getProvider = createProviderGetter();
 
 export default {
-	fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		// Checked before anything else — no OAuth/KV lookup, no SSE bridge to
+		// Cloud Run — so a flood is denied as cheaply as possible.
+		const limited = await checkRateLimit(request, env);
+		if (limited) return limited;
 		return getProvider(request).fetch(request, env, ctx);
 	},
 } satisfies ExportedHandler<Env>;
