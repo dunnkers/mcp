@@ -33,3 +33,9 @@ connector; see [docs/auth.md](docs/auth.md).
   post-meeting JSON) into the `text` of a Claude Code routine fire request.
   Not an MCP server. See
   [docs/claude-routine-webhook.md](docs/claude-routine-webhook.md).
+- [`servers/voice-memo-summarizer`](servers/voice-memo-summarizer) — a
+  Cloudflare Worker that sends any POSTed input (audio, images, PDFs, JSON,
+  text, …) to the latest Gemini Flash model on Vertex AI, authenticating to
+  Google Cloud with workload identity federation, and returns a faithful text
+  transcription. Not an MCP server. See
+  [docs/voice-memo-summarizer.md](docs/voice-memo-summarizer.md).

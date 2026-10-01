@@ -1,0 +1,34 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "voice-memo-summarizer",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-01",
+	"compatibility_flags": ["global_fetch_strictly_public"],
+	"observability": {
+		"enabled": true,
+	},
+	"vars": {
+		"GCP_PROJECT_ID": "voice-memo-summarizer",
+		"GCS_BUCKET": "voice-memo-summarizer-storage",
+		// Gemini 3.x Flash models are served from the `global` location.
+		"VERTEX_LOCATION": "global",
+		"GEMINI_MODEL": "gemini-3.8-flash",
+		"WIF_AUDIENCE": "//iam.googleapis.com/projects/884311914865/locations/global/workloadIdentityPools/cloudflare-workers/providers/voice-memo-summarizer-worker",
+		// Optional: exchange the federated token for this service account's token.
+		"SERVICE_ACCOUNT_EMAIL": "voice-memo-summarizer@voice-memo-summarizer.iam.gserviceaccount.com",
+		// Optional: pin the OIDC issuer (defaults to the origin the request arrived on).
+		// "OIDC_ISSUER": "https://voice-memo-summarizer.<your-subdomain>.workers.dev",
+	},
+	// Secrets (wrangler secret put): AUTH_TOKEN, OIDC_PRIVATE_KEY_JWK.
+	//
+	// Volumetric abuse protection. Rate-limit namespace ids are account-wide
+	// (bark-worker 1001, marktplaats-mcp 1002, vinted-mcp 1003,
+	// claude-routine-webhook 1004), so this Worker uses its own.
+	"ratelimits": [
+		{
+			"name": "RATE_LIMITER",
+			"namespace_id": "1005",
+			"simple": { "limit": 20, "period": 60 },
+		},
+	],
+}
