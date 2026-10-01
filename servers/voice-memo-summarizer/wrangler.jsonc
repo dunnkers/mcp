@@ -13,8 +13,7 @@
 		// Gemini 3.x Flash models are served from the `global` location.
 		"VERTEX_LOCATION": "global",
 		"GEMINI_MODEL": "gemini-3.8-flash",
-		// Fill in <PROJECT_NUMBER> (not the project id): see docs/voice-memo-summarizer.md.
-		"WIF_AUDIENCE": "//iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/cloudflare-workers/providers/voice-memo-summarizer-worker",
+		"WIF_AUDIENCE": "//iam.googleapis.com/projects/884311914865/locations/global/workloadIdentityPools/cloudflare-workers/providers/voice-memo-summarizer-worker",
 		// Optional: exchange the federated token for this service account's token.
 		"SERVICE_ACCOUNT_EMAIL": "voice-memo-summarizer@voice-memo-summarizer.iam.gserviceaccount.com",
 		// Optional: pin the OIDC issuer (defaults to the origin the request arrived on).

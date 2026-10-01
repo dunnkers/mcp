@@ -92,7 +92,7 @@ with a rule deleting objects under `uploads/` after 1 day.
 
 ### 2. Worker
 
-1. In `wrangler.jsonc`, replace `<PROJECT_NUMBER>` in `WIF_AUDIENCE` (the
+1. `WIF_AUDIENCE` in `wrangler.jsonc` already has the project number (884311914865; the
    other `vars` already match the names above).
 2. Generate the signing key and set both secrets:
 
