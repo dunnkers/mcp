@@ -57,6 +57,20 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Substitute the real KV namespace id
+        # The id isn't a credential, but it's account-specific, so it isn't
+        # committed. Read from the repo variable hevy-mcp's workflow uses
+        # (falling back to a same-named secret), and fail loudly if neither
+        # is set rather than handing wrangler an empty id.
+        env:
+          KV_NAMESPACE_ID: ${{ vars.CLOUDFLARE_OAUTH_KV_NAMESPACE_ID || secrets.CLOUDFLARE_OAUTH_KV_NAMESPACE_ID }}
+        run: |
+          if [ -z "${KV_NAMESPACE_ID}" ]; then
+            echo "::error::Set the CLOUDFLARE_OAUTH_KV_NAMESPACE_ID repository variable (Settings → Secrets and variables → Actions → Variables)."
+            exit 1
+          fi
+          sed -i "s/00000000000000000000000000000000/${KV_NAMESPACE_ID}/" wrangler.jsonc
+
       - name: Deploy Worker
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

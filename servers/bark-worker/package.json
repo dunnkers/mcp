@@ -26,5 +26,8 @@
         "dev": "wrangler dev",
         "predeploy": "npm run db:migrate:remote",
         "preview": "wrangler dev"
+    },
+    "dependencies": {
+        "@cloudflare/workers-oauth-provider": "^0.10.4"
     }
 }

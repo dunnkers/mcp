@@ -47,16 +47,24 @@ with its own OAuth access token — never the shared token itself. Requests to
 `/mcp` without a valid token are rejected before the MCP server (or any
 Vinted request) ever runs.
 
+The consent page only issues a grant to an authorization code request that
+has S256 PKCE and a redirect back to `claude.ai`, `claude.com` or a loopback
+address (override with the `ALLOWED_REDIRECT_HOSTS` var), and it shows the
+redirect host before you enter the token. See
+[`docs/auth.md`](../../../docs/auth.md) for the full scheme shared by every
+server in this repo.
+
 ### Setup
 
 1. Reuse the account's existing OAuth KV namespace (same one
    `hevy-mcp` and `marktplaats-mcp` use) — `wrangler.jsonc` commits a
    placeholder id (`00000000000000000000000000000000`); the deploy workflow
    substitutes the real id from the `CLOUDFLARE_OAUTH_KV_NAMESPACE_ID`
-   repository secret before running `wrangler deploy`.
-2. Set the consent-page password:
+   repository variable before running `wrangler deploy`.
+2. Set the consent-page password. It must be at least 32 characters, or
+   `/authorize` refuses to run:
    ```bash
-   npx wrangler secret put AUTH_TOKEN
+   openssl rand -hex 32 | npx wrangler secret put AUTH_TOKEN
    ```
 3. Deploy: `npm run deploy` (or push to `main` — see
    `.github/workflows/deploy-vinted-mcp.yml`).

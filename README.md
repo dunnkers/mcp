@@ -1,6 +1,9 @@
 # mcp
 Jeroen's MCP servers.
 
+Every MCP endpoint is behind OAuth 2.1 and works as a claude.ai custom
+connector; see [docs/auth.md](docs/auth.md).
+
 ## Servers
 
 - [`servers/hevy-mcp`](servers/hevy-mcp) — self-hosted [Hevy](https://www.hevyapp.com/)

@@ -24,8 +24,8 @@ targets Node.js/npm distribution rather than Cloudflare Workers:
   resolve those imports — an upstream-independent staleness issue, not
   something this port introduced.
 
-Like `hevy-mcp`, it needs no OAuth or per-user secrets for its default
-tools — it runs in the vendored client's `http` auth mode (fetch-based
+It needs no Vinted credentials for its default tools. It runs in the
+vendored client's `http` auth mode (fetch-based
 cookie/CSRF bootstrap, no browser). **Known limitation:** verified live in
 production, `get_seller` is fast and reliable, but `search_items` (and the
 `compare_prices`/`get_trending` tools built on it) reliably stall for
@@ -50,14 +50,20 @@ already set up. The deploy job runs under a `vinted-mcp-production`
 environment; add environment-scoped overrides there only if you want this
 Worker to deploy with different credentials than the others.
 
+`/mcp` is gated by OAuth, so it also needs the OAuth KV namespace and an
+`AUTH_TOKEN` consent password. See
+[auth.md](auth.md#setup-for-a-shared-password-worker) and run
+`openssl rand -hex 32 | npx wrangler secret put AUTH_TOKEN` from
+`servers/vinted-mcp/worker`.
+
 ## Connecting from Claude
 
 Once deployed, add it as a **custom connector**:
 
 1. claude.ai → Settings → Connectors → Add custom connector.
 2. URL: `https://<worker-name>.<your-subdomain>.workers.dev/mcp`
-3. Click Connect — no authorization step (same as `marktplaats-mcp`, the
-   default tools don't need per-user credentials).
+3. Click Connect. You're sent to the Worker's consent page; enter the
+   `AUTH_TOKEN` once.
 
 ## Local development
 
