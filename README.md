@@ -28,3 +28,8 @@ connector; see [docs/auth.md](docs/auth.md).
   Worker-native Bark-Server reimplementation with a built-in MCP endpoint,
   deployed as a Cloudflare Worker backed by D1. See
   [docs/bark-worker.md](docs/bark-worker.md) for setup and deploy details.
+- [`servers/claude-routine-webhook`](servers/claude-routine-webhook) — a
+  Cloudflare Worker passthrough that wraps any webhook body (e.g. Talat's
+  post-meeting JSON) into the `text` of a Claude Code routine fire request.
+  Not an MCP server. See
+  [docs/claude-routine-webhook.md](docs/claude-routine-webhook.md).

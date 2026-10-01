@@ -1,0 +1,25 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "claude-routine-webhook",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-01",
+	"compatibility_flags": ["global_fetch_strictly_public"],
+	"observability": {
+		"enabled": true,
+	},
+	// No secrets: the routine's own bearer token arrives on each request's
+	// Authorization header and is forwarded as-is, so the Worker can't fire
+	// anything the caller couldn't already fire directly.
+	//
+	// Volumetric abuse protection, checked before any upstream call.
+	// Rate-limit namespace ids are account-wide: Workers that share an id share
+	// counters, so each Worker in this repo uses its own (bark-worker 1001,
+	// marktplaats-mcp 1002, vinted-mcp 1003, claude-routine-webhook 1004).
+	"ratelimits": [
+		{
+			"name": "RATE_LIMITER",
+			"namespace_id": "1004",
+			"simple": { "limit": 30, "period": 60 },
+		},
+	],
+}
