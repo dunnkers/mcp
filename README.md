@@ -39,3 +39,8 @@ connector; see [docs/auth.md](docs/auth.md).
   Google Cloud with workload identity federation, and returns a faithful text
   transcription. Not an MCP server. See
   [docs/voice-memo-summarizer.md](docs/voice-memo-summarizer.md).
+- [`servers/jmap-mcp`](servers/jmap-mcp) — MCP server for managing an email
+  account over JMAP: Sieve filter scripts, the out-of-office reply and quota,
+  with no mail-reading tools. The JMAP server and login are Worker secrets, so
+  it works with any JMAP provider. Deployed as a Cloudflare Worker. See
+  [docs/jmap-mcp.md](docs/jmap-mcp.md).

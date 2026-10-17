@@ -1,0 +1,40 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "jmap-mcp",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-01",
+	// Required by the OAuth provider for CIMD (claude.ai identifies itself with
+	// a client metadata URL), and keeps Worker fetches from reaching private
+	// addresses.
+	"compatibility_flags": ["global_fetch_strictly_public"],
+	"observability": {
+		"enabled": true,
+	},
+	// Keep variables set in the Cloudflare dashboard (DENY_SIEVE_ACTIONS,
+	// READ_ONLY, ...) across deploys. Nothing provider-specific is committed:
+	// JMAP_SESSION_URL, JMAP_USERNAME, JMAP_PASSWORD and AUTH_TOKEN are secrets
+	// set with `wrangler secret put`, and survive deploys on their own.
+	"keep_vars": true,
+	// Stores OAuth clients, grants, and tokens issued by
+	// @cloudflare/workers-oauth-provider. The real namespace id is
+	// account-specific and isn't committed here (this is a public repo) —
+	// the deploy workflow substitutes it from the CLOUDFLARE_OAUTH_KV_NAMESPACE_ID
+	// repository variable before running `wrangler deploy`.
+	"kv_namespaces": [
+		{
+			"binding": "OAUTH_KV",
+			"id": "00000000000000000000000000000000",
+		},
+	],
+	// Volumetric abuse protection, checked before auth or any real work runs.
+	// Rate-limit namespace ids are account-wide: Workers that share an id share
+	// counters, so each Worker in this repo uses its own (bark-worker 1001,
+	// marktplaats-mcp 1002, vinted-mcp 1003, jmap-mcp 1006; also claude-routine-webhook 1004, voice-memo-summarizer 1005).
+	"ratelimits": [
+		{
+			"name": "RATE_LIMITER",
+			"namespace_id": "1006",
+			"simple": { "limit": 60, "period": 60 },
+		},
+	],
+}

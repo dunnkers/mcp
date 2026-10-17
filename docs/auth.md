@@ -14,6 +14,7 @@ the URL secret.
 | `marktplaats-mcp` | The Worker's `AUTH_TOKEN` | Nothing (upstream API is public) |
 | `vinted-mcp` | The Worker's `AUTH_TOKEN` | Nothing (upstream API is public) |
 | `bark-worker` | The Worker's `AUTH_TOKEN` | Nothing (device keys are passed per call) |
+| `jmap-mcp` | The Worker's `AUTH_TOKEN` | Nothing (the JMAP login is a Worker secret) |
 
 ## How a client connects
 
@@ -53,7 +54,7 @@ the URL secret.
   reaching private addresses.
 
 Two further protections apply to the shared-password Workers (`marktplaats-mcp`,
-`vinted-mcp` and `bark-worker`):
+`vinted-mcp`, `bark-worker` and `jmap-mcp`):
 
 - **Redirect allowlist.** A grant can only be sent back to `claude.ai`,
   `claude.com` or a loopback address (`localhost`, `127.0.0.1`, `[::1]`, used
