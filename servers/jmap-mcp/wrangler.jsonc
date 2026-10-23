@@ -29,7 +29,7 @@
 	// Volumetric abuse protection, checked before auth or any real work runs.
 	// Rate-limit namespace ids are account-wide: Workers that share an id share
 	// counters, so each Worker in this repo uses its own (bark-worker 1001,
-	// marktplaats-mcp 1002, vinted-mcp 1003, jmap-mcp 1006; also claude-routine-webhook 1004, voice-memo-summarizer 1005).
+	// marktplaats-mcp 1002, vinted-mcp 1003, jmap-mcp 1006).
 	"ratelimits": [
 		{
 			"name": "RATE_LIMITER",

@@ -28,17 +28,6 @@ connector; see [docs/auth.md](docs/auth.md).
   Worker-native Bark-Server reimplementation with a built-in MCP endpoint,
   deployed as a Cloudflare Worker backed by D1. See
   [docs/bark-worker.md](docs/bark-worker.md) for setup and deploy details.
-- [`servers/claude-routine-webhook`](servers/claude-routine-webhook) — a
-  Cloudflare Worker passthrough that wraps any webhook body (e.g. Talat's
-  post-meeting JSON) into the `text` of a Claude Code routine fire request.
-  Not an MCP server. See
-  [docs/claude-routine-webhook.md](docs/claude-routine-webhook.md).
-- [`servers/voice-memo-summarizer`](servers/voice-memo-summarizer) — a
-  Cloudflare Worker that sends any POSTed input (audio, images, PDFs, JSON,
-  text, …) to the latest Gemini Flash model on Vertex AI, authenticating to
-  Google Cloud with workload identity federation, and returns a faithful text
-  transcription. Not an MCP server. See
-  [docs/voice-memo-summarizer.md](docs/voice-memo-summarizer.md).
 - [`servers/jmap-mcp`](servers/jmap-mcp) — MCP server for managing an email
   account over JMAP: Sieve filter scripts, the out-of-office reply and quota,
   with no mail-reading tools. The JMAP server and login are Worker secrets, so
