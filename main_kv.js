@@ -248,10 +248,10 @@ async function handleRequest(request, env, ctx) {
 
 class Handler {
     constructor(db, options) {
-        this.version = 'v2.2.6'
-        this.build = '2026-07-14 11:28:28'
+        this.version = 'v2.3.4'
+        this.build = '2026-09-12 17:45:41'
         this.arch = 'js'
-        this.commit = '3d79c533282d2a1f054523255662835c26957898'
+        this.commit = '3db0918856d5aca4d141300c84d5c7a9f851ba44'
         this.allowNewDevice = options.allowNewDevice
         this.allowQueryNums = options.allowQueryNums
         
@@ -285,7 +285,7 @@ class Handler {
                 })
             }
 
-            if (!(key && await db.deviceTokenByKey(key))){
+            if (!(key && await db.deviceTokenByKey(key) != undefined)) {
                 if (this.allowNewDevice) {
                     key = await util.newShortUUID()
                 } else {
@@ -573,7 +573,7 @@ class APNs {
             }
 
             authToken = await generateAuthToken()
-            await db.saveAuthorizationToken(authToken, util.getTimestamp())
+            await db.saveAuthorizationToken(authToken)
 
             return authToken
         }
@@ -601,6 +601,9 @@ class APNs {
     }
 }
 
+let cachedAuthToken = {}
+let cachedDeviceToken = {}
+
 class Database {
     constructor(env) {
         // Make database private
@@ -613,29 +616,73 @@ class Database {
 
         this.deviceTokenByKey = async (key) => {
             const device_key = (key || '').replace(/[^a-zA-Z0-9]/g, '') || '_PLACE_HOLDER_'
+
+            if (device_key && cachedDeviceToken[device_key]) {
+                return cachedDeviceToken[device_key]
+            }
+
             const deviceToken = await kvStorage.get(device_key)
+
+            if (deviceToken) {
+                cachedDeviceToken[device_key] = deviceToken
+            }
+
             return deviceToken
         }
 
         this.saveDeviceTokenByKey = async (key, token) => {
             const device_token = (token || '').replace(/[^a-z0-9]/g, '') || ''
             const deviceToken = await kvStorage.put(key, device_token)
+
+            if (device_token === '') {
+                delete cachedDeviceToken[key]
+            } else {
+                cachedDeviceToken[key] = device_token
+            }
+
             return await deviceToken
         }
 
         this.deleteDeviceByKey = async (key) => {
             const device_key = (key || '').replace(/[^a-zA-Z0-9]/g, '') || '_PLACE_HOLDER_'
             const deviceToken = await kvStorage.delete(device_key)
+
+            delete cachedDeviceToken[device_key]
+
             return await deviceToken
         }
 
         this.saveAuthorizationToken = async (token) => {
-            const authToken = await kvStorage.put('_authToken_', token, { expirationTtl: 3000 })
+            const timestamp = util.getTimestamp()
+            const authToken = await kvStorage.put('_authToken_', JSON.stringify({
+                'token': token,
+                'time': timestamp,
+            }), { expirationTtl: 3000 })
+
+            cachedAuthToken = {
+                'token': token,
+                'timestamp': timestamp,
+            }
+
             return await authToken
         }
 
         this.authorizationToken = async () => {
-            return await kvStorage.get('_authToken_')
+            if (cachedAuthToken && (util.getTimestamp() - cachedAuthToken.timestamp < 3000)) {
+                return cachedAuthToken.token
+            }
+
+            const result = await kvStorage.get('_authToken_', 'json')
+
+            if (result && result.token && result.time) {
+                cachedAuthToken = {
+                    'token': result.token,
+                    'timestamp': result.time,
+                }
+                return result.token
+            }
+
+            return undefined
         }
     }
 }

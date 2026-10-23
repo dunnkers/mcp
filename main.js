@@ -266,10 +266,10 @@ async function handleRequest(request, env, ctx) {
 
 class Handler {
     constructor(db, options) {
-        this.version = 'v2.3.3'
-        this.build = '2026-07-14 11:28:28'
+        this.version = 'v2.3.4'
+        this.build = '2026-09-12 17:45:41'
         this.arch = 'js'
-        this.commit = '3d79c533282d2a1f054523255662835c26957898'
+        this.commit = '3db0918856d5aca4d141300c84d5c7a9f851ba44'
         this.allowNewDevice = options.allowNewDevice
         this.allowQueryNums = options.allowQueryNums
 
@@ -303,7 +303,7 @@ class Handler {
                 })
             }
 
-            if (!(key && await db.deviceTokenByKey(key))) {
+            if (!(key && await db.deviceTokenByKey(key) != undefined)) {
                 if (this.allowNewDevice) {
                     key = await util.newShortUUID()
                 } else {
@@ -893,7 +893,7 @@ class APNs {
             }
 
             authToken = await generateAuthToken()
-            await db.saveAuthorizationToken(authToken, util.getTimestamp())
+            await db.saveAuthorizationToken(authToken)
 
             return authToken
         }
@@ -921,6 +921,10 @@ class APNs {
     }
 }
 
+let cachedAuthToken = {}
+let cachedDeviceToken = {}
+let cachedMCPSession = {}
+
 class Database {
     constructor(env) {
         const db = env.database
@@ -938,16 +942,33 @@ class Database {
 
         this.deviceTokenByKey = async (key) => {
             const device_key = (key || '').replace(/[^a-zA-Z0-9]/g, '') || '_PLACE_HOLDER_'
+
+            if (device_key && cachedDeviceToken[device_key]) {
+                return cachedDeviceToken[device_key]
+            }
+
             const query = 'SELECT `token` FROM `devices` WHERE `key` = ?'
             const result = await db.prepare(query).bind(device_key).run()
 
-            return (result.results[0] || { 'token': undefined }).token
+            if (result.results.length > 0) {
+                cachedDeviceToken[device_key] = result.results[0].token
+
+                return result.results[0].token
+            }
+            
+            return undefined
         }
 
         this.saveDeviceTokenByKey = async (key, token) => {
             const device_token = (token || '').replace(/[^a-z0-9]/g, '') || ''
             const query = 'INSERT INTO `devices` (`key`, `token`) VALUES (?, ?) ON CONFLICT(`key`) DO UPDATE SET `token` = EXCLUDED.`token`'
             const result = await db.prepare(query).bind(key, device_token).run()
+
+            if (device_token === '') {
+                delete cachedDeviceToken[key]
+            } else {
+                cachedDeviceToken[key] = device_token
+            }
 
             return result
         }
@@ -957,25 +978,41 @@ class Database {
             const query = 'DELETE FROM `devices` WHERE `key` = ?'
             const result = await db.prepare(query).bind(device_key).run()
 
+            delete cachedDeviceToken[device_key]
+
             return result
         }
 
         this.saveAuthorizationToken = async (token) => {
+            const timestamp = util.getTimestamp()
             const query = 'INSERT INTO `authorization` (`id`, `token`, `time`) VALUES (1, ?, ?) ON CONFLICT(`id`) DO UPDATE SET `token` = EXCLUDED.`token`,`time` = EXCLUDED.`time`'
-            const result = await db.prepare(query).bind(token, util.getTimestamp()).run()
+            const result = await db.prepare(query).bind(token, timestamp).run()
+
+            cachedAuthToken = {
+                'token': token,
+                'timestamp': timestamp,
+            }
 
             return result
         }
 
         this.authorizationToken = async () => {
+            if (cachedAuthToken && (util.getTimestamp() - cachedAuthToken.timestamp < 3000)) {
+                return cachedAuthToken.token
+            }
+
             const query = 'SELECT `token`, `time` FROM `authorization` WHERE `id` = 1'
             const result = await db.prepare(query).run()
 
             if (result.results.length > 0) {
                 const tokenTime = parseInt(result.results[0].time)
-                const timeDifference = util.getTimestamp() - tokenTime
 
-                if (timeDifference <= 3000) {
+                if (util.getTimestamp() - tokenTime <= 3000) {
+                    cachedAuthToken = {
+                        'token': result.results[0].token,
+                        'timestamp': tokenTime,
+                    }
+
                     return result.results[0].token
                 }
             }
@@ -984,31 +1021,73 @@ class Database {
         }
 
         this.sessionBySessionID = async (sessionId) => {
-            const now = util.getTimestamp()
-            const query = 'SELECT `id`, `device_key`, `initialized` FROM `sessions` WHERE `id` = ? AND `last_seen` > ? AND `created_at` > ?'
-            const result = await db.prepare(query).bind(sessionId, now - 3600, now - 86400).run()
+            const timestamp = util.getTimestamp()
 
-            return result.results[0] || null
+            if (sessionId && cachedMCPSession[sessionId]) {
+                const session = cachedMCPSession[sessionId]
+                if (session.last_seen > timestamp - 3600 && session.created_at > timestamp - 86400) {
+                    return session
+                } else {
+                    delete cachedMCPSession[sessionId]
+                }
+            }
+
+            const query = 'SELECT `id`, `device_key`, `initialized`, `created_at`, `last_seen` FROM `sessions` WHERE `id` = ? AND `last_seen` > ? AND `created_at` > ?'
+            const result = await db.prepare(query).bind(sessionId, timestamp - 3600, timestamp - 86400).run()
+
+            if (result.results.length > 0) {
+                cachedMCPSession[sessionId] = result.results[0]
+
+                return result.results[0]
+            }
+
+            return undefined
         }
 
         this.saveSessionBySessionID = async (sessionId, deviceKey, initialized, lastSeen) => {
-            const now = util.getTimestamp()
+            const timestamp = util.getTimestamp()
             const query = 'INSERT INTO `sessions` (`id`, `device_key`, `initialized`, `created_at`, `last_seen`) VALUES (?, ?, ?, ?, ?) ON CONFLICT(`id`) DO UPDATE SET `initialized` = EXCLUDED.`initialized`, `last_seen` = EXCLUDED.`last_seen`'
+            const result = await db.prepare(query).bind(sessionId, deviceKey || null, initialized ? 1 : 0, timestamp, lastSeen ?? timestamp).run()
 
-            return await db.prepare(query).bind(sessionId, deviceKey || null, initialized ? 1 : 0, now, lastSeen ?? now).run()
+            if (cachedMCPSession[sessionId]) {
+                cachedMCPSession[sessionId].initialized = initialized ? 1 : 0
+                cachedMCPSession[sessionId].last_seen = lastSeen ?? timestamp
+            } else {
+                cachedMCPSession[sessionId] = {
+                    id: sessionId,
+                    device_key: deviceKey || null,
+                    initialized: initialized ? 1 : 0,
+                    created_at: timestamp,
+                    last_seen: lastSeen ?? timestamp
+                }
+            }
+
+            return result
         }
 
         this.deleteSessionBySessionID = async (sessionId) => {
             const query = 'DELETE FROM `sessions` WHERE `id` = ?'
+            const result = await db.prepare(query).bind(sessionId).run()
 
-            return await db.prepare(query).bind(sessionId).run()
+            delete cachedMCPSession[sessionId]
+
+            return result
         }
 
         this.cleanupExpiredSessions = async () => {
-            const now = util.getTimestamp()
+            const timestamp = util.getTimestamp()
 
             const query = 'DELETE FROM `sessions` WHERE `last_seen` < ? OR `created_at` < ?'
-            return await db.prepare(query).bind(now - 3600, now - 86400).run()
+            const result = await db.prepare(query).bind(timestamp - 3600, timestamp - 86400).run()
+
+            for (const id in cachedMCPSession) {
+                const session = cachedMCPSession[id]
+                if (session.last_seen < timestamp - 3600 || session.created_at < timestamp - 86400) {
+                    delete cachedMCPSession[id]
+                }
+            }
+
+            return result
         }
     }
 }
