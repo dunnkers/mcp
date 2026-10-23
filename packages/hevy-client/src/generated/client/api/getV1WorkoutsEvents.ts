@@ -3,46 +3,29 @@
  * Do not edit manually.
  */
 
-import fetch from "../../../fetch.ts";
+import type { Options, Unwrappable, RequestResult } from "../../.kubb/client";
 import type {
-  Client,
-  RequestConfig,
-  ResponseErrorConfig,
-} from "../../../fetch.ts";
-import type {
-  GetV1WorkoutsEventsQueryResponse,
-  GetV1WorkoutsEventsQueryParams,
-  GetV1WorkoutsEventsHeaderParams,
-  GetV1WorkoutsEvents500,
-} from "../types/GetV1WorkoutsEvents.ts";
-
-function getGetV1WorkoutsEventsUrl() {
-  const res = { method: "GET", url: `/v1/workouts/events` as const };
-  return res;
-}
+  GetV1WorkoutsEventsOptions,
+  GetV1WorkoutsEventsResponses,
+} from "../types/GetV1WorkoutsEvents";
+import { client, withUnwrap } from "../../.kubb/client";
 
 /**
  * @description Returns a paginated array of workout events, indicating updates or deletions.
  * @summary Retrieve a paged list of workout events (updates or deletes) since a given date. Events are ordered from newest to oldest. The intention is to allow clients to keep their local cache of workouts up to date without having to fetch the entire list of workouts.
  * {@link /v1/workouts/events}
  */
-export async function getV1WorkoutsEvents(
-  headers: GetV1WorkoutsEventsHeaderParams,
-  params?: GetV1WorkoutsEventsQueryParams,
-  config: Partial<RequestConfig> & { client?: Client } = {},
-) {
-  const { client: request = fetch, ...requestConfig } = config;
+export function getV1WorkoutsEvents<ThrowOnError extends boolean = true>(
+  options: Options<GetV1WorkoutsEventsOptions, ThrowOnError>,
+): Unwrappable<RequestResult<GetV1WorkoutsEventsResponses, ThrowOnError>> {
+  const { client: request = client, ...config } = options;
 
-  const res = await request<
-    GetV1WorkoutsEventsQueryResponse,
-    ResponseErrorConfig<GetV1WorkoutsEvents500>,
-    unknown
-  >({
-    method: "GET",
-    url: getGetV1WorkoutsEventsUrl().url.toString(),
-    params,
-    ...requestConfig,
-    headers: { ...headers, ...requestConfig.headers },
-  });
-  return res.data;
+  return withUnwrap(
+    request({
+      method: "GET",
+      url: "/v1/workouts/events",
+      ...config,
+      throwOnError: config.throwOnError ?? true,
+    }) as Promise<RequestResult<GetV1WorkoutsEventsResponses, ThrowOnError>>,
+  );
 }

@@ -1,18 +1,11 @@
 import { runServer } from "./runtime.js";
-import { MissingHevyApiKeyError } from "./utils/config.js";
-import { createSafeErrorDiagnostic } from "@hevy-mcp/core";
-import { flushTelemetry } from "./utils/telemetry.js";
+import {
+	getSafeStartupMessage,
+	handleFatalStartupError,
+} from "./utils/startup-errors.js";
 
-void runServer().catch(async (error) => {
-	if (error instanceof MissingHevyApiKeyError) {
-		console.error(error.message);
-	} else {
-		console.error("Fatal error in main()", createSafeErrorDiagnostic(error));
-	}
-	try {
-		await flushTelemetry();
-	} catch {
-		// Preserve the original fatal exit when telemetry flushing fails.
-	}
-	process.exit(1);
+export { getSafeStartupMessage, handleFatalStartupError };
+
+void runServer().catch(async (error: Error | string) => {
+	await handleFatalStartupError(error);
 });

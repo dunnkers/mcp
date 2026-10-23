@@ -1,3 +1,4 @@
+import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
 import { configDefaults, defineConfig } from "vitest/config";
 
@@ -12,6 +13,30 @@ export default defineConfig({
 		},
 	},
 	test: {
+		pool: "forks",
+		isolate: true,
+		// Vitest 5 defaults clearMocks to true, which wipes call-count state
+		// recorded in earlier tests (for example the shared tool-registration
+		// spies). Tests were written against explicit reset semantics, so keep
+		// the vitest 4 behavior and reset mocks deliberately where needed.
+		clearMocks: false,
+		// Only unit opts into two workers. Other lanes stay serial: release-unit
+		// includes performance samples and tests that clean their report path.
+		maxWorkers:
+			process.env.HEVY_UNIT_LANE === "1"
+				? Math.min(2, availableParallelism())
+				: 1,
+		deps: {
+			optimizer: {
+				ssr: {
+					enabled: true,
+					// Bundle the large Effect namespace once rather than loading
+					// its module graph in every isolated test file. Include the
+					// test clock entrypoint so both share the same Effect internals.
+					include: ["effect", "effect/testing"],
+				},
+			},
+		},
 		setupFiles: [
 			fileURLToPath(
 				new URL("./tests/setup/cloudflare-runtime.ts", import.meta.url).href,
@@ -33,7 +58,18 @@ export default defineConfig({
 			provider: "v8",
 			reportsDirectory: "coverage",
 			reporter: ["text", "lcov"],
-			exclude: ["tests/performance/**"],
+			// Apply thresholds only in the unit lane; other lanes upload partial
+			// reports to Codecov.
+			thresholds:
+				process.env.HEVY_UNIT_LANE === "1"
+					? { statements: 82, branches: 76, functions: 85, lines: 84 }
+					: undefined,
+			exclude: [
+				...(configDefaults.coverage.exclude ?? []),
+				"tests/performance/**",
+				"tests/fixtures/**",
+				"packages/hevy-client/src/generated/**",
+			],
 		},
 	},
 });

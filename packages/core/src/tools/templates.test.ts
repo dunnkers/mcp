@@ -1,14 +1,21 @@
 /* oxlint-disable typescript/unbound-method */
 import type { JSONObject } from "@modelcontextprotocol/server";
-import { describe, expect, it } from "vitest";
+import { Effect } from "effect";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
 	createMockHevyClient,
 	createMockMcpServer,
 } from "../../test-fixtures/mock-hevy.js";
+import {
+	ExerciseTemplateCatalogService,
+	HevyClientService,
+} from "../runtime/effect-services.js";
+import type { ExerciseTemplateCatalog } from "../utils/exercise-template-catalog.js";
 import { createToolRuntime } from "./tool-runtime.js";
 import { registerToolDefinition } from "./define-tool.js";
 import { templateToolDefinitions } from "./templates.js";
+import type { HevyOperations } from "@hevy-mcp/operations";
 
 function register(client: ReturnType<typeof createMockHevyClient> | null) {
 	const { server, registerTool: tool } = createMockMcpServer();
@@ -99,5 +106,104 @@ describe("exercise template tools", () => {
 				primaryMuscleGroup: "chest",
 			}),
 		).toThrow();
+	});
+
+	it("uses layer client and catalog services when getter facades disagree", async () => {
+		const layerClient = createMockHevyClient();
+		const getterClient = createMockHevyClient();
+		layerClient.getExerciseTemplate.mockResolvedValue({
+			id: "layer-template",
+			title: "Layer Template",
+		});
+		getterClient.getExerciseTemplate.mockRejectedValue(
+			new Error("wrong client source"),
+		);
+		const layerCatalog: ExerciseTemplateCatalog = {
+			effect: vi.fn(() =>
+				Effect.succeed([{ id: "layer-template", title: "Layer Template" }]),
+			),
+			get: vi.fn(),
+			reset: vi.fn(() => Effect.void),
+			close: vi.fn(() => Effect.void),
+		};
+		const getterCatalog: ExerciseTemplateCatalog = {
+			effect: vi.fn(() => Effect.succeed([])),
+			get: vi.fn().mockRejectedValue(new Error("wrong catalog source")),
+			reset: vi.fn(() => Effect.void),
+			close: vi.fn(() => Effect.void),
+		};
+		const runtime = createToolRuntime({
+			client: layerClient,
+			catalog: layerCatalog,
+		});
+		vi.spyOn(runtime, "getClient").mockReturnValue(getterClient);
+		Object.assign(runtime, { catalog: getterCatalog });
+
+		await expect(
+			Effect.runPromise(
+				templateToolDefinitions[0].execute(runtime, {
+					exercise_template_id: "layer-template",
+				}),
+			),
+		).resolves.toEqual({
+			exercise_template: {
+				id: "layer-template",
+				title: "Layer Template",
+			},
+			exercise_template_id: "layer-template",
+		});
+		await expect(
+			Effect.runPromise(
+				templateToolDefinitions[3].execute(runtime, {
+					query: "layer",
+					refresh: false,
+				}),
+			),
+		).resolves.toMatchObject({
+			results: [{ id: "layer-template", title: "Layer Template" }],
+		});
+
+		expect(runtime.service(HevyClientService)).toBe(layerClient);
+		expect(runtime.service(ExerciseTemplateCatalogService)).toBe(layerCatalog);
+		expect(layerClient.getExerciseTemplate).toHaveBeenCalledWith(
+			"layer-template",
+		);
+		expect(getterClient.getExerciseTemplate).not.toHaveBeenCalled();
+		expect(layerCatalog.effect).toHaveBeenCalledOnce();
+		expect(layerCatalog.get).not.toHaveBeenCalled();
+		expect(getterCatalog.get).not.toHaveBeenCalled();
+	});
+
+	it("provides the catalog service for operations-only runtimes", async () => {
+		const catalog: ExerciseTemplateCatalog = {
+			effect: vi.fn(() =>
+				Effect.succeed([{ id: "template-1", title: "Bench Press" }]),
+			),
+			get: vi.fn(),
+			reset: vi.fn(() => Effect.void),
+			close: vi.fn(() => Effect.void),
+		};
+		const runtime = createToolRuntime({
+			client: null,
+			operations: {} as HevyOperations,
+			catalog,
+		});
+		const { server, registerTool: tool } = createMockMcpServer();
+		registerToolDefinition(server, runtime, templateToolDefinitions[3]);
+
+		const result = await handler(
+			tool,
+			"search-exercise-templates",
+		)({
+			query: "bench",
+			refresh: false,
+		});
+
+		expect(result).toMatchObject({
+			structuredContent: {
+				exercise_templates: [{ id: "template-1", title: "Bench Press" }],
+			},
+		});
+		expect(catalog.effect).toHaveBeenCalledOnce();
 	});
 });

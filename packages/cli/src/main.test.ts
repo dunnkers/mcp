@@ -1,15 +1,34 @@
 /* oxlint-disable typescript/unbound-method */
-import { HevyHttpError, type HevyClient } from "@hevy-mcp/hevy-client";
+import {
+	ApiError,
+	HevyHttpError,
+	NetworkError,
+	NotFoundError,
+	RateLimitError,
+	type HevyClient,
+	ValidationError,
+} from "@hevy-mcp/hevy-client";
+import { Effect } from "effect";
 import { describe, expect, it, vi } from "vitest";
 import { runCli } from "./main.js";
+import { createEffectClient } from "./test-fixtures/effect-client.js";
+
+vi.mock("@hevy-mcp/operations", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("@hevy-mcp/operations")>();
+	return {
+		...actual,
+		createOperations: vi.fn(actual.createOperations),
+	};
+});
+
+const createOperationsSpy = async () =>
+	vi.mocked((await import("@hevy-mcp/operations")).createOperations);
 
 type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
 type JsonObject = { readonly [key: string]: JsonValue };
 
 const mockClient = (getWorkouts: HevyClient["getWorkouts"]): HevyClient => {
-	const client = Object.create(null) as HevyClient;
-	client.getWorkouts = getWorkouts;
-	return client;
+	return createEffectClient({ getWorkouts });
 };
 
 const streams = () => {
@@ -48,12 +67,75 @@ describe("CLI process contract", () => {
 		expect(io.out.slice(outBeforeVersion.length)).toBe("0.0.0\n");
 	});
 
+	it("keeps help and version aliases credential-free", async () => {
+		for (const argv of [["-h"], ["-v"]] as const) {
+			const io = streams();
+			const clientFactory = vi.fn(() => mockClient(vi.fn()));
+			const code = await runCli({
+				argv: [...argv],
+				env: {},
+				clientFactory,
+				streams: io.streams,
+			});
+			expect(code).toBe(0);
+			expect(clientFactory).not.toHaveBeenCalled();
+			expect(io.err).toBe("");
+		}
+	});
+
 	it("keeps missing credentials on stderr", async () => {
 		const io = streams();
 		const code = await runCli({ argv: ["user"], env: {}, streams: io.streams });
 		expect(code).toBe(1);
 		expect(io.out).toBe("");
 		expect(io.err).toContain("HEVY_API_KEY");
+	});
+
+	it("writes opt-in structured command events to stderr", async () => {
+		const io = streams();
+		const getWorkouts = vi.fn().mockResolvedValue({
+			page: 1,
+			page_count: 1,
+			workouts: [],
+		});
+		const code = await runCli({
+			argv: ["workouts", "list", "--json"],
+			env: { HEVY_API_KEY: "key", HEVY_CLI_LOG: "true" },
+			streams: io.streams,
+			clientFactory: () => mockClient(getWorkouts),
+		});
+
+		expect(code).toBe(0);
+		expect(JSON.parse(io.err)).toMatchObject({
+			event: "cli.command",
+			outcome: "success",
+			command: "workouts",
+			subcommand: "list",
+			exit_code: 0,
+		});
+		expect(io.out).toContain('"workouts":[]');
+	});
+
+	it("does not include raw arguments in structured CLI error logs", async () => {
+		const io = streams();
+		const privateValue = "private-workout-reference";
+		const code = await runCli({
+			argv: ["workouts", "list", "--page", privateValue],
+			env: { HEVY_API_KEY: "key", HEVY_CLI_LOG: "true" },
+			streams: io.streams,
+			clientFactory: () => mockClient(vi.fn()),
+		});
+		const event = JSON.parse(io.err.split("\n", 1)[0] ?? "{}");
+
+		expect(code).toBe(2);
+		expect(event).toMatchObject({
+			event: "cli.command",
+			outcome: "failure",
+			command: "workouts",
+			subcommand: "list",
+			exit_code: 2,
+		});
+		expect(io.err).not.toContain(privateValue);
 	});
 
 	it("returns a concise semantic error without calling the API", async () => {
@@ -89,6 +171,39 @@ describe("CLI process contract", () => {
 		expect(io.err).toBe("The API returned invalid pagination metadata\n");
 	});
 
+	it("rejects missing pagination metadata as an API failure", async () => {
+		const io = streams();
+		const getWorkouts = vi.fn().mockResolvedValue({
+			page: 1,
+			workouts: [],
+		});
+		const code = await runCli({
+			argv: ["workouts", "list"],
+			env: { HEVY_API_KEY: "key" },
+			streams: io.streams,
+			clientFactory: () => mockClient(getWorkouts),
+		});
+		expect(code).toBe(3);
+		expect(io.err).toBe("The API returned invalid pagination metadata\n");
+	});
+
+	it("preserves operation pagination failures as API failures", async () => {
+		const io = streams();
+		const getWorkouts = vi.fn().mockResolvedValue({
+			page: 2,
+			page_count: 2,
+			workouts: [],
+		});
+		const code = await runCli({
+			argv: ["workouts", "list"],
+			env: { HEVY_API_KEY: "key" },
+			streams: io.streams,
+			clientFactory: () => mockClient(getWorkouts),
+		});
+		expect(code).toBe(3);
+		expect(io.err).toBe("The API returned invalid pagination metadata\n");
+	});
+
 	it("passes coerced API-shaped values to the client", async () => {
 		const io = streams();
 		const getWorkouts = vi.fn().mockResolvedValue({
@@ -105,6 +220,78 @@ describe("CLI process contract", () => {
 		expect(code).toBe(0);
 		expect(getWorkouts).toHaveBeenCalledWith({ page: 2, pageSize: 10 });
 		expect(io.err).toBe("");
+	});
+
+	it("keeps the legacy summary week range", async () => {
+		const io = streams();
+		const getWorkouts = vi.fn().mockResolvedValue({
+			page: 1,
+			page_count: 1,
+			workouts: [],
+		});
+		const getBodyMeasurements = vi.fn().mockResolvedValue({
+			page: 1,
+			page_count: 1,
+			body_measurements: [],
+		});
+		const code = await runCli({
+			argv: ["summary", "--weeks", "13", "--json"],
+			env: { HEVY_API_KEY: "key" },
+			streams: io.streams,
+			clientFactory: () =>
+				createEffectClient({ getWorkouts, getBodyMeasurements }),
+		});
+		expect(code).toBe(0);
+		expect(JSON.parse(io.out)).toMatchObject({ weeks: 13 });
+	});
+
+	it("classifies invalid summary dates as API failures", async () => {
+		const io = streams();
+		const getWorkouts = vi.fn().mockResolvedValue({
+			page: 1,
+			page_count: 1,
+			workouts: [{ id: "w1", start_time: "not-a-date" }],
+		});
+		const getBodyMeasurements = vi.fn().mockResolvedValue({
+			page: 1,
+			page_count: 1,
+			body_measurements: [],
+		});
+		const code = await runCli({
+			argv: ["summary", "--json"],
+			env: { HEVY_API_KEY: "key" },
+			streams: io.streams,
+			clientFactory: () =>
+				createEffectClient({ getWorkouts, getBodyMeasurements }),
+		});
+		expect(code).toBe(3);
+		expect(JSON.parse(io.err)).toMatchObject({
+			message: "The API returned an item with an invalid date",
+		});
+	});
+
+	it("classifies malformed summary pagination as an API failure", async () => {
+		const io = streams();
+		const getWorkouts = vi.fn().mockResolvedValue({
+			page: 1,
+			workouts: [],
+		});
+		const getBodyMeasurements = vi.fn().mockResolvedValue({
+			page: 1,
+			page_count: 1,
+			body_measurements: [],
+		});
+		const code = await runCli({
+			argv: ["summary", "--json"],
+			env: { HEVY_API_KEY: "key" },
+			streams: io.streams,
+			clientFactory: () =>
+				createEffectClient({ getWorkouts, getBodyMeasurements }),
+		});
+		expect(code).toBe(3);
+		expect(JSON.parse(io.err)).toMatchObject({
+			message: "The API returned invalid pagination metadata",
+		});
 	});
 
 	it("binds invocation control and projects execution fields in JSON errors", async () => {
@@ -143,29 +330,90 @@ describe("CLI process contract", () => {
 			safe_to_retry: false,
 		});
 	});
+
+	it("builds operations from the raw client and forwards execution options", async () => {
+		const io = streams();
+		const signal = new AbortController().signal;
+		const deadline = Date.now() + 1_000;
+		const getWorkouts = vi.fn().mockResolvedValue({
+			page: 1,
+			page_count: 1,
+			workouts: [],
+		});
+		const rawClient = mockClient(getWorkouts);
+		const spy = await createOperationsSpy();
+		spy.mockClear();
+		const code = await runCli({
+			argv: ["workouts", "list"],
+			env: { HEVY_API_KEY: "key" },
+			clientFactory: () => rawClient,
+			execution: { signal, deadline },
+			streams: io.streams,
+		});
+		expect(code).toBe(0);
+		expect(spy).toHaveBeenCalledTimes(1);
+		const [operationsClient] = spy.mock.calls[0];
+		expect(operationsClient).toBe(rawClient);
+		expect(getWorkouts).toHaveBeenCalledWith(
+			{ page: 1, pageSize: 5 },
+			expect.objectContaining({ signal, deadline }),
+		);
+	});
+
+	it("keeps operations on the raw client without execution", async () => {
+		const io = streams();
+		const getWorkouts = vi.fn().mockResolvedValue({
+			page: 1,
+			page_count: 1,
+			workouts: [],
+		});
+		const rawClient = mockClient(getWorkouts);
+		const spy = await createOperationsSpy();
+		spy.mockClear();
+		const code = await runCli({
+			argv: ["workouts", "list"],
+			env: { HEVY_API_KEY: "key" },
+			clientFactory: () => rawClient,
+			streams: io.streams,
+		});
+		expect(code).toBe(0);
+		expect(spy).toHaveBeenCalledTimes(1);
+		const [operationsClient] = spy.mock.calls[0];
+		expect(operationsClient).toBe(rawClient);
+	});
 });
 
 function mutationClient(): HevyClient {
-	const client = Object.create(null) as HevyClient;
-	client.createWorkout = vi.fn().mockResolvedValue({ id: "workout-1" });
-	client.updateWorkout = vi.fn().mockResolvedValue({ id: "workout-1" });
-	client.createRoutine = vi.fn().mockResolvedValue({ id: "routine-1" });
-	client.updateRoutine = vi.fn().mockResolvedValue({ id: "routine-1" });
-	client.createExerciseTemplate = vi.fn().mockResolvedValue({ id: 2 });
-	client.createRoutineFolder = vi.fn().mockResolvedValue({ id: 3 });
-	client.createBodyMeasurement = vi.fn().mockResolvedValue({
-		date: "2024-01-02",
-		weight_kg: 80,
+	return createEffectClient({
+		getWorkout: vi.fn().mockResolvedValue({
+			id: "workout-1",
+			title: "Push",
+			description: null,
+			start_time: "2024-01-01T10:00:00Z",
+			end_time: "2024-01-01T11:00:00Z",
+			exercises: [],
+		}),
+		createWorkout: vi.fn().mockResolvedValue({ id: "workout-1" }),
+		updateWorkout: vi.fn().mockResolvedValue({ id: "workout-1" }),
+		createRoutine: vi.fn().mockResolvedValue({ routine: { id: "routine-1" } }),
+		updateRoutine: vi.fn().mockResolvedValue({ routine: { id: "routine-1" } }),
+		createExerciseTemplate: vi.fn().mockResolvedValue({ id: 2 }),
+		createRoutineFolder: vi
+			.fn()
+			.mockResolvedValue({ routine_folder: { id: 3 } }),
+		createBodyMeasurement: vi.fn().mockResolvedValue({
+			date: "2024-01-02",
+			weight_kg: 80,
+		}),
+		getBodyMeasurement: vi.fn().mockResolvedValue({
+			date: "2024-01-02",
+			weight_kg: 80,
+		}),
+		updateBodyMeasurement: vi.fn().mockResolvedValue({
+			date: "2024-01-02",
+			weight_kg: 81,
+		}),
 	});
-	client.getBodyMeasurement = vi.fn().mockResolvedValue({
-		date: "2024-01-02",
-		weight_kg: 80,
-	});
-	client.updateBodyMeasurement = vi.fn().mockResolvedValue({
-		date: "2024-01-02",
-		weight_kg: 81,
-	});
-	return client;
 }
 
 describe("CLI mutation process contract", () => {
@@ -328,4 +576,209 @@ describe("CLI mutation process contract", () => {
 		expect(io.out).toBe("");
 		expect(io.err).toBe(`${message}\n`);
 	});
+
+	it.each([
+		["HEVY_REQUEST_ABORTED", undefined, 4],
+		["HEVY_DEADLINE_EXCEEDED", undefined, 4],
+		["HEVY_RETRY_EXHAUSTED", 503, 3],
+	] as const)(
+		"preserves %s in JSON diagnostics after Effect collapse",
+		async (errorCode, status, expectedExitCode) => {
+			const io = streams();
+			const getWorkouts = vi.fn().mockRejectedValue(
+				new HevyHttpError("request failed", {
+					status,
+					method: "GET",
+					endpoint: "/v1/workouts",
+					code: errorCode,
+					outcome:
+						errorCode === "HEVY_REQUEST_ABORTED"
+							? "cancelled"
+							: errorCode === "HEVY_DEADLINE_EXCEEDED"
+								? "deadline_exceeded"
+								: "terminal_failure",
+				}),
+			);
+			const code = await runCli({
+				argv: ["workouts", "list", "--json"],
+				env: { HEVY_API_KEY: "key" },
+				clientFactory: () => mockClient(getWorkouts),
+				streams: io.streams,
+			});
+
+			expect(code).toBe(expectedExitCode);
+			expect(JSON.parse(io.err)).toMatchObject({
+				error_code: errorCode,
+			});
+		},
+	);
+});
+
+describe("CLI JSON error_code compatibility", () => {
+	const errorCases = [
+		[
+			"ApiError",
+			new ApiError({
+				status: 500,
+				endpoint: "/v1/workouts",
+				method: "GET",
+				code: "HEVY_RETRY_EXHAUSTED",
+			}),
+			"HEVY_RETRY_EXHAUSTED",
+			3,
+		],
+		[
+			"NetworkError",
+			new NetworkError({
+				code: "ERR_NETWORK",
+				endpoint: "/v1/workouts",
+				method: "GET",
+				retryExhausted: false,
+			}),
+			"ERR_NETWORK",
+			4,
+		],
+		[
+			"NotFoundError",
+			new NotFoundError({
+				status: 404,
+				endpoint: "/v1/workouts/:workoutId",
+				method: "GET",
+				expected: false,
+			}),
+			undefined,
+			3,
+		],
+		[
+			"RateLimitError",
+			new RateLimitError({
+				status: 429,
+				endpoint: "/v1/workouts",
+				method: "GET",
+			}),
+			undefined,
+			3,
+		],
+		[
+			"ValidationError",
+			new ValidationError({
+				status: 400,
+				endpoint: "/v1/workouts",
+				method: "GET",
+			}),
+			undefined,
+			3,
+		],
+		[
+			"HevyHttpError",
+			new HevyHttpError("request failed", {
+				status: 503,
+				method: "GET",
+				endpoint: "/v1/workouts",
+				code: "HEVY_RETRY_EXHAUSTED",
+			}),
+			"HEVY_RETRY_EXHAUSTED",
+			3,
+		],
+		[
+			"execution cancellation",
+			new HevyHttpError("request canceled", {
+				method: "GET",
+				endpoint: "/v1/workouts",
+				code: "HEVY_REQUEST_ABORTED",
+				outcome: "cancelled",
+			}),
+			"HEVY_REQUEST_ABORTED",
+			4,
+		],
+		[
+			"execution deadline",
+			new HevyHttpError("request deadline exceeded", {
+				method: "GET",
+				endpoint: "/v1/workouts",
+				code: "HEVY_DEADLINE_EXCEEDED",
+				outcome: "deadline_exceeded",
+			}),
+			"HEVY_DEADLINE_EXCEEDED",
+			4,
+		],
+		["generic", new Error("ordinary failure"), undefined, 2],
+		["string", "ordinary string failure", undefined, 2],
+		[
+			"hostile",
+			new Error(
+				"hostile-fake-secret Authorization Bearer fake-token should be redacted",
+			),
+			undefined,
+			2,
+		],
+	] as const;
+
+	it("omits error_code from successful JSON", async () => {
+		const io = streams();
+		const code = await runCli({
+			argv: ["workouts", "list", "--json"],
+			env: { HEVY_API_KEY: "fake-key" },
+			clientFactory: () =>
+				mockClient(
+					vi.fn().mockResolvedValue({
+						page: 1,
+						page_count: 1,
+						workouts: [],
+					}),
+				),
+			streams: io.streams,
+		});
+
+		expect(code).toBe(0);
+		expect(JSON.parse(io.out)).not.toHaveProperty("error_code");
+		expect(io.err).toBe("");
+	});
+
+	it.each(errorCases)(
+		"keeps the accepted error_code and exit family for %s",
+		async (_name, error, expectedErrorCode, expectedExitCode) => {
+			const io = streams();
+			const createOperations = await createOperationsSpy();
+			const actualCreateOperations = createOperations.getMockImplementation();
+			if (actualCreateOperations === undefined) {
+				throw new Error("Missing createOperations test implementation");
+			}
+			const baseline = actualCreateOperations(mockClient(vi.fn()));
+			createOperations.mockImplementationOnce(() => ({
+				...baseline,
+				workouts: {
+					...baseline.workouts,
+					list: {
+						...baseline.workouts.list,
+						effect: () => Effect.fail(error as never),
+					},
+				},
+			}));
+			const code = await runCli({
+				argv: ["workouts", "list", "--json"],
+				env: { HEVY_API_KEY: "fake-key" },
+				clientFactory: () => mockClient(vi.fn()),
+				streams: io.streams,
+			});
+			const diagnostic = JSON.parse(io.err) as {
+				readonly error_code?: string;
+			};
+
+			expect(code).toBe(expectedExitCode);
+			if (expectedErrorCode === undefined) {
+				expect(diagnostic).not.toHaveProperty("error_code");
+			} else {
+				expect(diagnostic).toHaveProperty("error_code", expectedErrorCode);
+			}
+			expect(io.out).toBe("");
+			expect(io.err).not.toContain("Effect");
+			expect(io.err).not.toContain("Cause");
+			expect(io.err).not.toContain("Fiber");
+			if (_name === "hostile") {
+				expect(io.err).not.toContain("hostile-fake-secret");
+				expect(io.err).not.toContain("fake-token");
+			}
+		},
+	);
 });

@@ -1,7 +1,8 @@
 import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
+import { Effect } from "effect";
 import type { Routine } from "@hevy-mcp/hevy-client/types";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createToolRuntime } from "./tool-runtime.js";
 import {
@@ -11,6 +12,7 @@ import {
 } from "./register.js";
 import type { ExerciseTemplateCatalog } from "../utils/exercise-template-catalog.js";
 import { createMockHevyClient } from "../../test-fixtures/mock-hevy.js";
+import type { ToolObserver } from "../diagnostics/observation.js";
 
 type SchemaObject = {
 	readonly type?: string | readonly string[];
@@ -234,7 +236,121 @@ const EXPECTED_TOOL_NAMES = [
 
 	"get-training-summary",
 	"search-routines",
+	"feedback",
 ] as const;
+
+const validRoutine = {
+	title: "Test Routine",
+	exercises: [
+		{
+			exercise_template_id: "template-1",
+			sets: [{ type: "normal" }],
+		},
+	],
+};
+
+const VALID_CALL_ARGUMENTS = {
+	"get-workouts": { page: 1 },
+	"get-workout": { workout_id: "workout-1" },
+	"get-workout-events": { page: 1 },
+	"create-workout": {
+		workout: {
+			title: "Test Workout",
+			start_time: "2026-01-01T00:00:00Z",
+			end_time: "2026-01-01T01:00:00Z",
+			is_private: false,
+			exercises: [],
+		},
+	},
+	"update-workout": {
+		workout_id: "workout-1",
+		workout: { title: "Updated Workout", is_private: false },
+	},
+	"replace-workout-exercises": {
+		workout_id: "workout-1",
+		workout: { is_private: false, exercises: [] },
+	},
+	"get-routines": { page: 1 },
+	"get-routine": { routine_id: "routine-1" },
+	"create-routine": { routine: validRoutine },
+	"update-routine": { routine_id: "routine-1", routine: validRoutine },
+	"get-exercise-template": { exercise_template_id: "template-1" },
+	"get-exercise-history": { exercise_template_id: "template-1" },
+	"create-exercise-template": {
+		exercise: {
+			title: "Test Template",
+			exercise_type: "weight_reps",
+			equipment_category: "none",
+			muscle_group: "chest",
+		},
+	},
+	"search-exercise-templates": { query: "test" },
+	"get-routine-folder": { folder_id: "folder-1" },
+	"create-routine-folder": { routine_folder: { title: "Test Folder" } },
+	"get-body-measurements": { page: 1 },
+	"get-body-measurement": { date: "2026-01-01" },
+	"create-body-measurement": { date: "2026-01-01", weight_kg: 80 },
+	"update-body-measurement": { date: "2026-01-01", weight_kg: 81 },
+	"get-training-summary": {},
+	"search-routines": { query: "test" },
+	feedback: { message: "technical feedback" },
+} as const;
+
+const completeWorkout = {
+	id: "workout-1",
+	title: "Test Workout",
+	start_time: "2026-01-01T00:00:00Z",
+	end_time: "2026-01-01T01:00:00Z",
+	exercises: [],
+};
+
+function configureRegisterCallClient() {
+	const mockClient = createMockHevyClient();
+	mockClient.getWorkouts.mockResolvedValue({
+		page: 1,
+		page_count: 1,
+		workouts: [],
+	});
+	mockClient.getWorkout.mockResolvedValue(completeWorkout);
+	mockClient.getRoutines.mockResolvedValue({
+		page: 1,
+		page_count: 1,
+		routines: [],
+	});
+	mockClient.getRoutineById.mockResolvedValue({
+		routine: {
+			id: "routine-1",
+			title: "Test Routine",
+			exercises: [],
+		},
+	});
+	mockClient.getWorkoutEvents.mockResolvedValue({
+		page: 1,
+		page_count: 1,
+		events: [],
+	});
+	return mockClient;
+}
+
+async function connectToolProtocol(
+	server: McpServer,
+	name: string,
+): Promise<{
+	readonly protocolClient: Client;
+	readonly server: McpServer;
+}> {
+	const protocolClient = new Client({
+		name: `tool-contract-client-${name}`,
+		version: "1.0.0",
+	});
+	const [clientTransport, serverTransport] =
+		InMemoryTransport.createLinkedPair();
+	await Promise.all([
+		server.connect(serverTransport),
+		protocolClient.connect(clientTransport),
+	]);
+	return { protocolClient, server };
+}
 
 describe("registerHevyTools", () => {
 	let client: Client;
@@ -243,8 +359,10 @@ describe("registerHevyTools", () => {
 	beforeEach(async () => {
 		server = new McpServer({ name: "tool-list-test", version: "1.0.0" });
 		const catalog: ExerciseTemplateCatalog = {
+			effect: () => Effect.succeed([]),
 			get: () => Promise.resolve([]),
-			reset: () => {},
+			reset: () => Effect.void,
+			close: () => Effect.void,
 		};
 		registerHevyTools(
 			server,
@@ -267,11 +385,168 @@ describe("registerHevyTools", () => {
 		await Promise.all([client.close(), server.close()]);
 	});
 
-	it("advertises the complete production tool set without an API client", async () => {
+	it("[VAL-MCP-001] advertises exactly 23 production tools without an API client", async () => {
 		const { tools } = await client.listTools();
 
+		expect(EXPECTED_TOOL_NAMES).toHaveLength(23);
 		expect(tools).toHaveLength(EXPECTED_TOOL_NAMES.length);
 		expect(tools.map(({ name }) => name)).toEqual(EXPECTED_TOOL_NAMES);
+	});
+
+	it("[VAL-MCP-005] keeps the protocol catalog at 23 tools and excludes get-user-info", async () => {
+		const { tools } = await client.listTools();
+
+		expect(tools.map(({ name }) => name)).toEqual(EXPECTED_TOOL_NAMES);
+		expect(tools.map(({ name }) => name)).not.toContain("get-user-info");
+	});
+
+	it("[VAL-MCP-006] rejects callTool for the intentionally unregistered get-user-info tool", async () => {
+		await expect(
+			client.callTool({ name: "get-user-info", arguments: {} }),
+		).rejects.toThrow(/unknown|not found/u);
+	});
+
+	it("[VAL-MCP-008] keeps every registered tool callable through the protocol path", async () => {
+		const mockClient = configureRegisterCallClient();
+		const productionServer = new McpServer({
+			name: "all-tool-call-server",
+			version: "1.0.0",
+		});
+		const catalog: ExerciseTemplateCatalog = {
+			effect: () => Effect.succeed([]),
+			get: () => Promise.resolve([]),
+			reset: () => Effect.void,
+			close: () => Effect.void,
+		};
+		registerHevyTools(
+			productionServer,
+			createToolRuntime({ client: mockClient, catalog }),
+		);
+		const pair = await connectToolProtocol(productionServer, "all");
+
+		try {
+			for (const name of EXPECTED_TOOL_NAMES) {
+				const result = await pair.protocolClient.callTool({
+					name,
+					arguments: VALID_CALL_ARGUMENTS[name],
+				});
+				expect(result, name).not.toMatchObject({ isError: true });
+				expect(result.content, name).toBeDefined();
+				expect(JSON.stringify(result), name).not.toMatch(/Effect|Cause|Layer/u);
+			}
+		} finally {
+			await Promise.all([pair.protocolClient.close(), pair.server.close()]);
+		}
+	});
+
+	it("[VAL-MCP-002/003/007] keeps listTools and callTool JSON unchanged when an observer is configured", async () => {
+		const buildServer = async (
+			name: string,
+			observer?: ToolObserver,
+		): Promise<{
+			readonly protocolClient: Client;
+			readonly server: McpServer;
+		}> => {
+			const mockClient = configureRegisterCallClient();
+			const server = new McpServer({
+				name: `${name}-server`,
+				version: "1.0.0",
+			});
+			const catalog: ExerciseTemplateCatalog = {
+				effect: () => Effect.succeed([]),
+				get: () => Promise.resolve([]),
+				reset: () => Effect.void,
+				close: () => Effect.void,
+			};
+			registerHevyTools(
+				server,
+				createToolRuntime({ client: mockClient, catalog, observer }),
+			);
+			return connectToolProtocol(server, name);
+		};
+		const observer: ToolObserver = {
+			start: () => ({
+				run: <T>(operation: () => Promise<T>) => operation(),
+				finish: () => {},
+			}),
+		};
+		const withoutObserver = await buildServer("without-observer");
+		const withObserver = await buildServer("with-observer", observer);
+
+		try {
+			const [withoutTools, withTools] = await Promise.all([
+				withoutObserver.protocolClient.listTools(),
+				withObserver.protocolClient.listTools(),
+			]);
+			expect(withTools).toEqual(withoutTools);
+
+			const [withoutResult, withResult] = await Promise.all([
+				withoutObserver.protocolClient.callTool({
+					name: "get-workout",
+					arguments: { workout_id: "workout-1" },
+				}),
+				withObserver.protocolClient.callTool({
+					name: "get-workout",
+					arguments: { workout_id: "workout-1" },
+				}),
+			]);
+			expect(withResult).toEqual(withoutResult);
+			expect(JSON.stringify(withResult)).not.toMatch(/Effect|Cause|Layer/u);
+		} finally {
+			await Promise.all([
+				withoutObserver.protocolClient.close(),
+				withoutObserver.server.close(),
+				withObserver.protocolClient.close(),
+				withObserver.server.close(),
+			]);
+		}
+	});
+
+	it("registers feedback through the unobserved path", async () => {
+		const rawMessage = "feedback-raw-message-sentinel";
+		const start = vi.fn(() => ({
+			run: <T>(operation: () => Promise<T>) => operation(),
+			finish: vi.fn(),
+		}));
+		const observer: ToolObserver = { start };
+		const feedbackServer = new McpServer({
+			name: "feedback-unobserved-server",
+			version: "1.0.0",
+		});
+		registerHevyTools(
+			feedbackServer,
+			createToolRuntime({
+				client: null,
+				catalog: {
+					effect: () => Effect.succeed([]),
+					get: () => Promise.resolve([]),
+					reset: () => Effect.void,
+					close: () => Effect.void,
+				},
+				observer,
+			}),
+		);
+		const pair = await connectToolProtocol(
+			feedbackServer,
+			"feedback-unobserved",
+		);
+
+		try {
+			const result = await pair.protocolClient.callTool({
+				name: "feedback",
+				arguments: { message: rawMessage },
+			});
+			expect(result).toMatchObject({
+				structuredContent: {
+					accepted: false,
+					reason: "telemetry_unavailable",
+				},
+			});
+			expect(JSON.stringify(result)).not.toContain(rawMessage);
+			expect(start).not.toHaveBeenCalled();
+		} finally {
+			await Promise.all([pair.protocolClient.close(), pair.server.close()]);
+		}
 	});
 
 	it("shares memoized tool schemas across independently built servers", async () => {
@@ -280,8 +555,10 @@ describe("registerHevyTools", () => {
 		const { tools: firstTools } = await client.listTools();
 
 		const catalog: ExerciseTemplateCatalog = {
+			effect: () => Effect.succeed([]),
 			get: () => Promise.resolve([]),
-			reset: () => {},
+			reset: () => Effect.void,
+			close: () => Effect.void,
 		};
 		const buildPair = (name: string) => {
 			const rebuilt = new McpServer({
@@ -343,6 +620,111 @@ describe("registerHevyTools", () => {
 			}),
 		);
 	});
+	it("returns saved folders and routines from enveloped write responses", async () => {
+		const mockClient = createMockHevyClient();
+		mockClient.createRoutineFolder
+			.mockResolvedValueOnce({ routine_folder: { id: 7, title: "Strength" } })
+			.mockResolvedValueOnce({});
+		mockClient.updateRoutine
+			.mockResolvedValueOnce({
+				routine: { id: "routine-1", title: "Push", exercises: [] },
+			})
+			.mockResolvedValueOnce({});
+		const writeServer = new McpServer({
+			name: "write-envelope-server",
+			version: "1.0.0",
+		});
+		registerHevyTools(
+			writeServer,
+			createToolRuntime({
+				client: mockClient,
+				catalog: {
+					effect: () => Effect.succeed([]),
+					get: () => Promise.resolve([]),
+					reset: () => Effect.void,
+					close: () => Effect.void,
+				},
+			}),
+		);
+		const { protocolClient } = await connectToolProtocol(
+			writeServer,
+			"write-envelopes",
+		);
+		const createFolder = () =>
+			protocolClient.callTool({
+				name: "create-routine-folder",
+				arguments: { routine_folder: { title: "Strength" } },
+			});
+		const updateRoutine = () =>
+			protocolClient.callTool({
+				name: "update-routine",
+				arguments: {
+					routine_id: "routine-1",
+					routine: {
+						title: "Push",
+						exercises: [
+							{ exercise_template_id: "bench", sets: [{ type: "normal" }] },
+						],
+					},
+				},
+			});
+
+		try {
+			const { tools } = await protocolClient.listTools();
+			const outputSchemaOf = (name: string) =>
+				tools.find((tool) => tool.name === name)?.outputSchema;
+			expect(outputSchemaOf("create-routine-folder")).toMatchObject({
+				properties: { created: { const: true } },
+			});
+			expect(outputSchemaOf("update-routine")).toMatchObject({
+				properties: { updated: { const: true } },
+			});
+
+			const createdFolder = await createFolder();
+			expect(createdFolder).not.toMatchObject({ isError: true });
+			expect(createdFolder.structuredContent).toEqual({
+				created: true,
+				commit_state: "confirmed",
+				routine_folder: { id: 7, title: "Strength" },
+				folder_id: 7,
+			});
+
+			const unconfirmedFolder = await createFolder();
+			expect(unconfirmedFolder).not.toMatchObject({ isError: true });
+			expect(unconfirmedFolder.structuredContent).toEqual({
+				created: true,
+				commit_state: "confirmed",
+				routine_folder: null,
+				folder_id: null,
+			});
+			expect(JSON.stringify(unconfirmedFolder.content)).toContain(
+				"before retrying",
+			);
+
+			const updated = await updateRoutine();
+			expect(updated).not.toMatchObject({ isError: true });
+			expect(updated.structuredContent).toEqual({
+				updated: true,
+				commit_state: "confirmed",
+				routine: { id: "routine-1", title: "Push", exercises: [] },
+				routine_id: "routine-1",
+				uses_rep_ranges: false,
+			});
+
+			const updatedWithoutBody = await updateRoutine();
+			expect(updatedWithoutBody).not.toMatchObject({ isError: true });
+			expect(updatedWithoutBody.structuredContent).toEqual({
+				updated: true,
+				commit_state: "confirmed",
+				routine: null,
+				routine_id: "routine-1",
+				uses_rep_ranges: false,
+			});
+		} finally {
+			await Promise.all([protocolClient.close(), writeServer.close()]);
+		}
+	});
+
 	it("keeps the serialized create-routine contract aligned with dispatch", async () => {
 		const mockClient = createMockHevyClient();
 		const productionServer = new McpServer({
@@ -350,8 +732,10 @@ describe("registerHevyTools", () => {
 			version: "1.0.0",
 		});
 		const catalog: ExerciseTemplateCatalog = {
+			effect: () => Effect.succeed([]),
 			get: () => Promise.resolve([]),
-			reset: () => {},
+			reset: () => Effect.void,
+			close: () => Effect.void,
 		};
 		registerHevyTools(
 			productionServer,
@@ -389,7 +773,9 @@ describe("registerHevyTools", () => {
 			});
 
 			const payload = createRoutinePayload;
-			mockClient.createRoutine.mockResolvedValue(createdRoutineResponse);
+			mockClient.createRoutine.mockResolvedValue({
+				routine: createdRoutineResponse,
+			});
 
 			const result = await protocolClient.callTool({
 				name: "create-routine",
@@ -407,6 +793,104 @@ describe("registerHevyTools", () => {
 			expect(mockClient.createRoutine.mock.calls[0]?.[0]).toEqual(
 				expectedCreateRoutineRequest,
 			);
+
+			const legacyResult = await protocolClient.callTool({
+				name: "create-routine",
+				arguments: {
+					title: "Full Body A",
+					folderId: 123,
+					notes: "First four exercises are the minimum viable workout",
+					exercises: [
+						{
+							exerciseTemplateId: "30E293E3",
+							supersetId: null,
+							restSeconds: 120,
+							notes: "Controlled active ROM",
+							sets: [{ type: "normal", repRange: { start: 6, end: 10 } }],
+						},
+					],
+				},
+			});
+			expect(legacyResult).not.toMatchObject({ isError: true });
+			expect(mockClient.createRoutine.mock.calls[1]?.[0]).toEqual(
+				expectedCreateRoutineRequest,
+			);
+			const connectedResult = await protocolClient.callTool({
+				name: "create-routine",
+				arguments: {
+					title: "Tuesday — Full Body Hypertrophy",
+					notes:
+						"Increase weight after all working sets reach the top of the range.",
+					exercises: [
+						{
+							exerciseTemplateId: "234897AB",
+							supersetId: 1,
+							restSeconds: 60,
+							notes: "8–15 reps",
+							sets: [
+								{
+									reps: 15,
+									weight: null,
+									distance: null,
+									duration: null,
+									customMetric: null,
+								},
+								{ reps: 15, weightKg: 0 },
+							],
+						},
+						{
+							exerciseTemplateId: "B5EFBF9C",
+							supersetId: 1,
+							restSeconds: 90,
+							notes: "8–15 reps",
+							sets: [{ reps: 15 }, { reps: 15 }],
+						},
+					],
+				},
+			});
+			expect(connectedResult).not.toMatchObject({ isError: true });
+			expect(mockClient.createRoutine.mock.calls[2]?.[0]).toMatchObject({
+				routine: {
+					title: "Tuesday — Full Body Hypertrophy",
+					notes:
+						"Increase weight after all working sets reach the top of the range.",
+					exercises: [
+						{
+							exercise_template_id: "234897AB",
+							superset_id: 1,
+							rest_seconds: 60,
+							notes: "8–15 reps",
+							sets: [
+								{ type: "normal", reps: 15 },
+								{ type: "normal", reps: 15 },
+							],
+						},
+						{
+							exercise_template_id: "B5EFBF9C",
+							superset_id: 1,
+							rest_seconds: 90,
+							notes: "8–15 reps",
+							sets: [
+								{ type: "normal", reps: 15 },
+								{ type: "normal", reps: 15 },
+							],
+						},
+					],
+				},
+			});
+			const firstConnectedSet =
+				mockClient.createRoutine.mock.calls[2]?.[0].routine?.exercises?.[0]
+					?.sets?.[0];
+			expect(firstConnectedSet).toMatchObject({
+				weight_kg: null,
+				distance_meters: null,
+				duration_seconds: null,
+				custom_metric: null,
+			});
+			expect(
+				mockClient.createRoutine.mock.calls[2]?.[0].routine?.exercises?.[0]
+					?.sets?.[1]?.weight_kg,
+			).toBe(0);
 
 			mockClient.createRoutine.mockResolvedValue(undefined);
 			const emptyResult = await protocolClient.callTool({
@@ -444,7 +928,7 @@ describe("registerHevyTools", () => {
 			expect(invalidText).not.toContain("SECRET-TITLE-SENTINEL");
 			expect(invalidText).not.toContain("SECRET-NOTES-SENTINEL");
 			expect(invalidText).not.toContain("SECRET-TEMPLATE-SENTINEL");
-			expect(mockClient.createRoutine).toHaveBeenCalledTimes(2);
+			expect(mockClient.createRoutine).toHaveBeenCalledTimes(4);
 
 			const missingExercisesResult = await protocolClient.callTool({
 				name: "create-routine",
@@ -453,14 +937,14 @@ describe("registerHevyTools", () => {
 			const missingExercisesText = JSON.stringify(missingExercisesResult);
 			expect(missingExercisesResult).toMatchObject({ isError: true });
 			expect(missingExercisesText).toContain("routine.exercises");
-			expect(mockClient.createRoutine).toHaveBeenCalledTimes(2);
+			expect(mockClient.createRoutine).toHaveBeenCalledTimes(4);
 		} finally {
 			await Promise.all([protocolClient.close(), productionServer.close()]);
 		}
 	});
 
 	it("declares bounded feature, kind, and operation metadata for every tool", () => {
-		expect(hevyToolDefinitions).toHaveLength(EXPECTED_TOOL_NAMES.length);
+		expect(hevyToolDefinitions).toHaveLength(22);
 		for (const definition of hevyToolDefinitions) {
 			expect([
 				"workouts",

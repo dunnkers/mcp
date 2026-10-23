@@ -19,7 +19,10 @@ hevy --help
 ```
 
 The CLI reads credentials only from `HEVY_API_KEY`. It does not accept API keys
-in command arguments, JSON payloads, or URLs.
+in command arguments, JSON payloads, or URLs. The published `hevy` command is a
+Promise-based adapter, so callers use commands such as `hevy workouts list`
+without constructing Effect programs. Its internal Effect request and
+operation programs collapse once at the CLI boundary.
 
 ## Examples
 
@@ -126,8 +129,10 @@ checks up to 10 API pages, with 100 templates per page; `--max-pages` accepts
 up to 100.
 
 Add `--json` to any command for machine-readable output. Successful commands
-write one JSON value followed by a newline to stdout. Errors write one
-sanitized line to stderr.
+write one JSON value followed by a newline to stdout. Errors write a sanitized
+message to stderr. Set `HEVY_CLI_LOG=true` to add a structured command outcome
+event to stderr; these logs omit raw arguments, API data, and credentials.
+Logging is disabled by default and does not change stdout.
 
 | Exit code | Meaning                                  |
 | --------- | ---------------------------------------- |

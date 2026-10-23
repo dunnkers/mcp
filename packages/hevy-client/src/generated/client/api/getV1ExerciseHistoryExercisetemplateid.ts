@@ -3,54 +3,37 @@
  * Do not edit manually.
  */
 
-import fetch from "../../../fetch.ts";
+import type { Options, Unwrappable, RequestResult } from "../../.kubb/client";
 import type {
-  Client,
-  RequestConfig,
-  ResponseErrorConfig,
-} from "../../../fetch.ts";
-import type {
-  GetV1ExerciseHistoryExercisetemplateidQueryResponse,
-  GetV1ExerciseHistoryExercisetemplateidPathParams,
-  GetV1ExerciseHistoryExercisetemplateidQueryParams,
-  GetV1ExerciseHistoryExercisetemplateidHeaderParams,
-  GetV1ExerciseHistoryExercisetemplateid400,
-} from "../types/GetV1ExerciseHistoryExercisetemplateid.ts";
-
-function getGetV1ExerciseHistoryExercisetemplateidUrl(
-  exerciseTemplateId: GetV1ExerciseHistoryExercisetemplateidPathParams["exerciseTemplateId"],
-) {
-  const res = {
-    method: "GET",
-    url: `/v1/exercise_history/${exerciseTemplateId}` as const,
-  };
-  return res;
-}
+  GetV1ExerciseHistoryExercisetemplateidOptions,
+  GetV1ExerciseHistoryExercisetemplateidResponses,
+} from "../types/GetV1ExerciseHistoryExercisetemplateid";
+import { client, withUnwrap } from "../../.kubb/client";
 
 /**
  * @summary Get exercise history for a specific exercise template
  * {@link /v1/exercise_history/:exerciseTemplateId}
  */
-export async function getV1ExerciseHistoryExercisetemplateid(
-  exerciseTemplateId: GetV1ExerciseHistoryExercisetemplateidPathParams["exerciseTemplateId"],
-  headers: GetV1ExerciseHistoryExercisetemplateidHeaderParams,
-  params?: GetV1ExerciseHistoryExercisetemplateidQueryParams,
-  config: Partial<RequestConfig> & { client?: Client } = {},
-) {
-  const { client: request = fetch, ...requestConfig } = config;
+export function getV1ExerciseHistoryExercisetemplateid<
+  ThrowOnError extends boolean = true,
+>(
+  options: Options<GetV1ExerciseHistoryExercisetemplateidOptions, ThrowOnError>,
+): Unwrappable<
+  RequestResult<GetV1ExerciseHistoryExercisetemplateidResponses, ThrowOnError>
+> {
+  const { client: request = client, ...config } = options;
 
-  const res = await request<
-    GetV1ExerciseHistoryExercisetemplateidQueryResponse,
-    ResponseErrorConfig<GetV1ExerciseHistoryExercisetemplateid400>,
-    unknown
-  >({
-    method: "GET",
-    url: getGetV1ExerciseHistoryExercisetemplateidUrl(
-      exerciseTemplateId,
-    ).url.toString(),
-    params,
-    ...requestConfig,
-    headers: { ...headers, ...requestConfig.headers },
-  });
-  return res.data;
+  return withUnwrap(
+    request({
+      method: "GET",
+      url: "/v1/exercise_history/{exerciseTemplateId}",
+      ...config,
+      throwOnError: config.throwOnError ?? true,
+    }) as Promise<
+      RequestResult<
+        GetV1ExerciseHistoryExercisetemplateidResponses,
+        ThrowOnError
+      >
+    >,
+  );
 }

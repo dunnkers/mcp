@@ -1,5 +1,5 @@
 import { request, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { connect, type AddressInfo } from "node:net";
 import { McpServer } from "@modelcontextprotocol/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -77,6 +77,7 @@ function call(
 	method: string,
 	body?: HttpJsonObject | string,
 	extraHeaders: Record<string, string> = {},
+	path = "/mcp",
 ): Promise<HttpResult> {
 	return new Promise((resolve, reject) => {
 		const payload = body === undefined ? undefined : JSON.stringify(body);
@@ -89,7 +90,7 @@ function call(
 			{
 				host: "127.0.0.1",
 				port,
-				path: "/mcp",
+				path,
 				method,
 				headers,
 			},
@@ -241,6 +242,73 @@ describe("Streamable HTTP server", () => {
 		}
 	});
 
+	it("serves a public health endpoint without opening an MCP session", async () => {
+		const { port } = await startTestServer();
+		const healthy = await call(port, "GET", undefined, {}, "/health");
+		const wrongMethod = await call(port, "POST", undefined, {}, "/health");
+		const invalidHost = await call(
+			port,
+			"GET",
+			undefined,
+			{ host: "untrusted.example" },
+			"/health",
+		);
+
+		expect(healthy).toMatchObject({
+			statusCode: 200,
+			body: '{"status":"ok"}',
+		});
+		expect(healthy.headers["cache-control"]).toBe("no-store");
+		expect(wrongMethod.statusCode).toBe(405);
+		expect(wrongMethod.headers.allow).toBe("GET");
+		expect(invalidHost.statusCode).toBe(403);
+	});
+
+	it.each([
+		{ method: "GET", status: "200 OK" },
+		{ method: "POST", status: "405 Method Not Allowed" },
+	])("bounds incomplete $method /health bodies", async ({ method, status }) => {
+		const handle = await startStreamableHttpServer(
+			{ transport: "http", host: "127.0.0.1", port: 0 },
+			"test-key",
+			createMcpServer,
+			{ bodyTimeoutMs: 50 },
+		);
+		handles.push(handle);
+		const port = serverPort(handle);
+		const socket = connect(port, "127.0.0.1");
+		let responseText = "";
+		let resolveResponse!: () => void;
+		const response = new Promise<void>((resolve) => {
+			resolveResponse = resolve;
+		});
+		const closed = new Promise<void>((resolve) => {
+			socket.once("close", resolve);
+		});
+		socket.on("error", () => {});
+		socket.on("data", (chunk) => {
+			responseText += chunk.toString();
+			if (responseText.includes("\r\n\r\n")) resolveResponse();
+		});
+		socket.once("connect", () =>
+			socket.write(
+				`${method} /health HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Length: 100\r\n\r\nx`,
+			),
+		);
+		await response;
+		expect(responseText).toContain(status);
+		await new Promise<void>((resolve, reject) => {
+			const timeout = setTimeout(
+				() => reject(new Error("Incomplete health body was not bounded")),
+				1_000,
+			);
+			void closed.then(() => {
+				clearTimeout(timeout);
+				resolve();
+			});
+		});
+	});
+
 	it("returns 429 at established-session capacity", async () => {
 		const first = await startStreamableHttpServer(
 			{ transport: "http", host: "127.0.0.1", port: 0 },
@@ -292,12 +360,60 @@ describe("Streamable HTTP server", () => {
 		await first.catch(() => undefined);
 	});
 
+	it("drains a shutdown admission response before force-closing connections", async () => {
+		const { handle, port } = await startTestServer();
+		let clientReady!: () => void;
+		const clientReadyPromise = new Promise<void>((resolve) => {
+			clientReady = resolve;
+		});
+		const response = new Promise<HttpResult>((resolve, reject) => {
+			const client = request(
+				{
+					host: "127.0.0.1",
+					port,
+					path: "/mcp",
+					method: "POST",
+					headers: {
+						"Content-Length": "0",
+						Connection: "close",
+					},
+				},
+				(response) => {
+					const chunks: Buffer[] = [];
+					response.on("data", (chunk: Buffer) => chunks.push(chunk));
+					response.once("end", () =>
+						resolve({
+							statusCode: response.statusCode,
+							headers: response.headers,
+							body: Buffer.concat(chunks).toString("utf8"),
+						}),
+					);
+				},
+			);
+			client.once("error", reject);
+			client.once("socket", (socket) => {
+				if (socket.connecting) socket.once("connect", clientReady);
+				else clientReady();
+			});
+			void clientReadyPromise.then(() => client.end());
+		});
+		await clientReadyPromise;
+		const closePromise = handle.close();
+
+		await expect(response).resolves.toMatchObject({
+			statusCode: 503,
+			body: '{"error":"HTTP server is shutting down. Retry shortly."}',
+		});
+		await expect(closePromise).resolves.toBeUndefined();
+		expect(handle.server.listening).toBe(false);
+	});
+
 	it("recovers capacity after DELETE and idle eviction", async () => {
 		const handle = await startStreamableHttpServer(
 			{ transport: "http", host: "127.0.0.1", port: 0 },
 			"test-key",
 			createMcpServer,
-			{ maxSessions: 1, idleTimeoutMs: 200 },
+			{ maxSessions: 1, idleTimeoutMs: 25 },
 		);
 		handles.push(handle);
 		const port = serverPort(handle);
@@ -425,6 +541,24 @@ describe("Streamable HTTP server", () => {
 				)
 			).statusCode,
 		).toBe(404);
+
+		expect(
+			(
+				await call(port, "DELETE", undefined, {
+					"mcp-session-id": firstSession,
+				})
+			).statusCode,
+		).toBe(200);
+		expect(
+			(
+				await call(
+					port,
+					"POST",
+					{ jsonrpc: "2.0", id: 5, method: "tools/list", params: {} },
+					{ "mcp-session-id": secondSession },
+				)
+			).statusCode,
+		).toBe(200);
 	});
 
 	it("removes a session on DELETE", async () => {
@@ -586,10 +720,17 @@ describe("Streamable HTTP server", () => {
 	});
 
 	it("returns structured errors when an MCP session fails during startup", async () => {
+		let attempts = 0;
 		const handle = await startStreamableHttpServer(
 			{ transport: "http", host: "127.0.0.1", port: 0 },
 			"test-key",
-			() => Promise.reject(new Error("private startup detail")),
+			() => {
+				attempts += 1;
+				return attempts === 1
+					? Promise.reject(new Error("private startup detail"))
+					: createMcpServer();
+			},
+			{ maxSessions: 1, maxInitializing: 1 },
 		);
 		handles.push(handle);
 
@@ -597,6 +738,7 @@ describe("Streamable HTTP server", () => {
 		expect(result.statusCode).toBe(500);
 		expect(result.body).toContain('"outcome":"terminal_failure"');
 		expect(result.body).not.toContain("private startup detail");
+		expect((await initialize(serverPort(handle))).statusCode).toBe(200);
 	});
 
 	it("rejects a DNS-rebinding Host header and closes active sessions", async () => {

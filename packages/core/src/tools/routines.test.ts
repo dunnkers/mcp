@@ -12,15 +12,17 @@ import {
 	workoutsListDescriptor,
 	type HevyOperations,
 } from "@hevy-mcp/operations";
-import type { ToolExecutionContext } from "../execution.js";
-import type { McpToolResponse } from "../utils/response-contracts.js";
+import type { ToolExecutionContext } from "../runtime/execution.js";
+import type { McpToolResponse } from "../protocol/response-contracts.js";
 import { HevyHttpError } from "@hevy-mcp/hevy-client";
+import { Effect } from "effect";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { getResultTelemetry } from "../utils/result-telemetry.js";
 import { createToolRuntime } from "./tool-runtime.js";
 import { registerToolDefinition } from "./define-tool.js";
 import { routineToolDefinitions } from "./routines.js";
+import { HevyOperationsService } from "../runtime/effect-services.js";
 
 function register(
 	client: HevyClient | null,
@@ -45,6 +47,14 @@ function handler(tool: { mock: { calls: unknown[][] } }, name: string) {
 	);
 	if (!call) throw new Error(`Tool ${name} was not registered`);
 	return call.at(-1) as (args: JSONObject) => Promise<McpToolResponse>;
+}
+
+function registerRuntime(runtime: ReturnType<typeof createToolRuntime>) {
+	const { server, registerTool: tool } = createMockMcpServer();
+	for (const definition of routineToolDefinitions) {
+		registerToolDefinition(server, runtime, definition);
+	}
+	return tool;
 }
 
 const routineInput = {
@@ -99,19 +109,39 @@ describe("routine tools", () => {
 	});
 
 	it("uses the injected routines list operation and execution context", async () => {
-		const execute = vi.fn().mockResolvedValue({
-			items: [{ id: "r1", title: "Push", exercises: [] }],
-			page: 2,
-			pageCount: 3,
-		});
+		const effect = vi.fn(() =>
+			Effect.succeed({
+				items: [{ id: "r1", title: "Push", exercises: [] }],
+				page: 2,
+				pageCount: 3,
+			}),
+		);
 		const operations = {
 			routines: {
-				get: { descriptor: routinesGetDescriptor, execute: vi.fn() },
-				list: { descriptor: routinesListDescriptor, execute },
+				get: {
+					descriptor: routinesGetDescriptor,
+					effect: vi.fn(() => Effect.succeed({ routine: null })),
+					execute: vi.fn(),
+				},
+				list: {
+					descriptor: routinesListDescriptor,
+					effect,
+					execute: vi.fn(),
+				},
 			},
 			workouts: {
-				get: { descriptor: workoutsGetDescriptor, execute: vi.fn() },
-				list: { descriptor: workoutsListDescriptor, execute: vi.fn() },
+				get: {
+					descriptor: workoutsGetDescriptor,
+					effect: vi.fn(() => Effect.succeed({ workout: null })),
+					execute: vi.fn(),
+				},
+				list: {
+					descriptor: workoutsListDescriptor,
+					effect: vi.fn(() =>
+						Effect.succeed({ items: [], page: 1, pageCount: 1 }),
+					),
+					execute: vi.fn(),
+				},
 			},
 		} satisfies HevyOperations;
 		const execution: ToolExecutionContext = {
@@ -128,7 +158,7 @@ describe("routine tools", () => {
 			page_size: 5,
 		});
 
-		expect(execute).toHaveBeenCalledWith({ page: 2, pageSize: 5 }, execution);
+		expect(effect).toHaveBeenCalledWith({ page: 2, pageSize: 5 }, execution);
 		expect(response).toMatchObject({
 			structuredContent: {
 				routines: [{ id: "r1", title: "Push" }],
@@ -139,17 +169,39 @@ describe("routine tools", () => {
 	});
 
 	it("uses the injected routines get operation and execution context", async () => {
-		const execute = vi.fn().mockResolvedValue({
-			routine: { id: "r1", title: "Push", exercises: [] },
-		});
+		const effect = vi.fn(() =>
+			Effect.succeed({
+				routine: { id: "r1", title: "Push", exercises: [] },
+			}),
+		);
 		const operations = {
 			routines: {
-				get: { descriptor: routinesGetDescriptor, execute },
-				list: { descriptor: routinesListDescriptor, execute: vi.fn() },
+				get: {
+					descriptor: routinesGetDescriptor,
+					effect,
+					execute: vi.fn(),
+				},
+				list: {
+					descriptor: routinesListDescriptor,
+					effect: vi.fn(() =>
+						Effect.succeed({ items: [], page: 1, pageCount: 1 }),
+					),
+					execute: vi.fn(),
+				},
 			},
 			workouts: {
-				get: { descriptor: workoutsGetDescriptor, execute: vi.fn() },
-				list: { descriptor: workoutsListDescriptor, execute: vi.fn() },
+				get: {
+					descriptor: workoutsGetDescriptor,
+					effect: vi.fn(() => Effect.succeed({ workout: null })),
+					execute: vi.fn(),
+				},
+				list: {
+					descriptor: workoutsListDescriptor,
+					effect: vi.fn(() =>
+						Effect.succeed({ items: [], page: 1, pageCount: 1 }),
+					),
+					execute: vi.fn(),
+				},
 			},
 		} satisfies HevyOperations;
 		const execution: ToolExecutionContext = {
@@ -165,10 +217,89 @@ describe("routine tools", () => {
 			routine_id: "r1",
 		});
 
-		expect(execute).toHaveBeenCalledWith({ routineId: "r1" }, execution);
+		expect(effect).toHaveBeenCalledWith({ routineId: "r1" }, execution);
 		expect(response).toMatchObject({
 			structuredContent: { routine: { id: "r1", title: "Push" } },
 		});
+	});
+
+	it("resolves both read operations from the service layer, not the getter", async () => {
+		const layerRoutinesGet = vi.fn(() =>
+			Effect.succeed({
+				routine: { id: "layer-routine", title: "Layer routine", exercises: [] },
+			}),
+		);
+		const layerRoutinesList = vi.fn(() =>
+			Effect.succeed({
+				items: [{ id: "layer-routine", title: "Layer routine", exercises: [] }],
+				page: 1,
+				pageCount: 1,
+			}),
+		);
+		const layerOperations: HevyOperations = {
+			workouts: {
+				get: {
+					descriptor: workoutsGetDescriptor,
+					effect: vi.fn(() => Effect.succeed({ workout: null })),
+					execute: vi.fn(),
+				},
+				list: {
+					descriptor: workoutsListDescriptor,
+					effect: vi.fn(() =>
+						Effect.succeed({ items: [], page: 1, pageCount: 1 }),
+					),
+					execute: vi.fn(),
+				},
+			},
+			routines: {
+				get: {
+					descriptor: routinesGetDescriptor,
+					effect: layerRoutinesGet,
+					execute: vi.fn(),
+				},
+				list: {
+					descriptor: routinesListDescriptor,
+					effect: layerRoutinesList,
+					execute: vi.fn(),
+				},
+			},
+		};
+		const getterOperations: HevyOperations = {
+			...layerOperations,
+			routines: {
+				get: {
+					...layerOperations.routines.get,
+					effect: vi.fn(() => Effect.die(new Error("wrong source"))),
+				},
+				list: {
+					...layerOperations.routines.list,
+					effect: vi.fn(() => Effect.die(new Error("wrong source"))),
+				},
+			},
+		};
+		const runtime = createToolRuntime({
+			client: createMockHevyClient(),
+			operations: layerOperations,
+			catalog: {} as never,
+		});
+		const getOperations = vi
+			.spyOn(runtime, "getOperations")
+			.mockReturnValue(getterOperations);
+		expect(runtime.service(HevyOperationsService)).toBe(layerOperations);
+		const tool = registerRuntime(runtime);
+
+		await handler(tool, "get-routines")({ page: 1, page_size: 5 });
+		await handler(tool, "get-routine")({ routine_id: "layer-routine" });
+
+		expect(layerRoutinesList).toHaveBeenCalledWith(
+			{ page: 1, pageSize: 5 },
+			undefined,
+		);
+		expect(layerRoutinesGet).toHaveBeenCalledWith(
+			{ routineId: "layer-routine" },
+			undefined,
+		);
+		expect(getOperations).not.toHaveBeenCalled();
 	});
 
 	it("parses a routine whose exercise rest_seconds is an integer", async () => {
@@ -241,12 +372,25 @@ describe("routine tools", () => {
 		});
 	});
 
+	it("does not expose an unrecognized create response as an empty routine", async () => {
+		const client = createMockHevyClient();
+		client.createRoutine.mockResolvedValue({ routine: {} });
+		const tool = register(client);
+
+		const response = await handler(tool, "create-routine")(routineInput);
+
+		expect(response.structuredContent).toMatchObject({
+			created: true,
+			commit_state: "confirmed",
+			routine: null,
+			routine_id: null,
+		});
+	});
+
 	it("returns the authoritative routine and ID when creation has a body", async () => {
 		const client = createMockHevyClient();
 		client.createRoutine.mockResolvedValue({
-			id: "routine-1",
-			title: "Push",
-			exercises: [],
+			routine: { id: "routine-1", title: "Push", exercises: [] },
 		});
 		const tool = register(client);
 
@@ -262,8 +406,8 @@ describe("routine tools", () => {
 
 	it("passes nested snake_case routine payloads to create and update", async () => {
 		const client = createMockHevyClient();
-		client.createRoutine.mockResolvedValue(routineInput.routine);
-		client.updateRoutine.mockResolvedValue(routineInput.routine);
+		client.createRoutine.mockResolvedValue({ routine: routineInput.routine });
+		client.updateRoutine.mockResolvedValue({ routine: routineInput.routine });
 		const tool = register(client);
 
 		await handler(tool, "create-routine")(routineInput);

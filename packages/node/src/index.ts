@@ -1,14 +1,22 @@
 import { createHevyMcpServer } from "@hevy-mcp/core";
 import { createHevyClient } from "@hevy-mcp/hevy-client";
-import { z } from "zod";
 import type { NodeTransport } from "./utils/arguments.js";
+import { assertApiKey } from "./utils/config.js";
+import type { NodeLifecycleHandle } from "./utils/node-lifecycle.js";
 
-const serverConfigSchema = z.object({
-	apiKey: z
-		.string()
-		.min(1, "Hevy API key is required")
-		.describe("Your Hevy API key (available in the Hevy app settings)."),
-});
+export type FeedbackResult =
+	| { readonly accepted: true }
+	| {
+			readonly accepted: false;
+			readonly reason:
+				| "telemetry_disabled"
+				| "telemetry_unavailable"
+				| "rejected";
+	  };
+
+export interface AgentFeedbackRecorder {
+	record(message: string): FeedbackResult;
+}
 
 /**
  * Create an unconnected MCP server for embedding in a Node application.
@@ -18,33 +26,43 @@ const serverConfigSchema = z.object({
  * telemetry, or connect a transport. The embedding application owns those
  * concerns and the transport lifecycle.
  */
-export function createNodeMcpServer(
-	{ apiKey }: { apiKey: string },
+export interface CreateNodeMcpServerOptions {
+	readonly apiKey: string;
+	/**
+	 * Client retry budget (also applies to PUT). Set to 0 to disable all
+	 * automatic request retries; reconcile uncertain writes before retrying.
+	 * Omit to retain the client's existing retry policy.
+	 */
+	readonly maxGetRetries?: number;
+	/** Optional caller-owned recorder for the privacy-safe feedback tool. */
+	readonly feedbackRecorder?: AgentFeedbackRecorder;
+}
+
+export async function createNodeMcpServer(
+	{ apiKey, maxGetRetries, feedbackRecorder }: CreateNodeMcpServerOptions,
 	_transport: NodeTransport = "stdio",
 	lifecycleSignal?: AbortSignal,
 ) {
-	try {
-		const { apiKey: validatedApiKey } = serverConfigSchema.parse({ apiKey });
-		return Promise.resolve(
-			createHevyMcpServer({
-				createClient: ({ onLog }) =>
-					createHevyClient({
-						apiKey: validatedApiKey,
-						onLog,
-					}),
-				lifecycleSignal,
+	assertApiKey(apiKey);
+	return await createHevyMcpServer({
+		createClient: ({ onLog }) =>
+			createHevyClient({
+				apiKey,
+				onLog,
+				maxGetRetries,
 			}),
-		);
-	} catch (error) {
-		return Promise.reject(error);
-	}
+		lifecycleSignal,
+		feedbackRecorder,
+	});
 }
 
 /**
  * Compatibility wrapper for the executable runtime. Importing this module
  * does not evaluate the runtime bootstrap; it is loaded only when invoked.
  */
-export async function runStdioServer(): Promise<void> {
+export async function runStdioServer(): Promise<
+	NodeLifecycleHandle | undefined
+> {
 	const { runStdioServer: run } = await import("./runtime.js");
 	return run();
 }
@@ -53,7 +71,7 @@ export async function runStdioServer(): Promise<void> {
  * Compatibility wrapper for the executable runtime. Importing this module
  * does not evaluate the runtime bootstrap; it is loaded only when invoked.
  */
-export async function runServer(): Promise<void> {
+export async function runServer(): Promise<NodeLifecycleHandle | undefined> {
 	const { runServer: run } = await import("./runtime.js");
 	return run();
 }

@@ -21,6 +21,12 @@
 			"cache": true,
 			"inputs": ["boundaryInputs", "controlPlaneInputs"]
 		},
+		"check:duplication": {
+			"executor": "nx:run-commands",
+			"cache": true,
+			"options": { "command": "pnpm run check:duplication" },
+			"inputs": ["duplicationInputs"]
+		},
 		"check:exports": {
 			"executor": "nx:run-commands",
 			"cache": true,
@@ -79,6 +85,7 @@
 		},
 		"test:unit": {
 			"cache": true,
+			"parallelism": false,
 			"inputs": ["unitTests", { "env": "HEVY_TEST_REPORT_MODE" }],
 			"outputs": [
 				"{workspaceRoot}/coverage/unit",
@@ -90,6 +97,7 @@
 			"inputs": ["releaseUnitTests"]
 		},
 		"test:mcp": {
+			"dependsOn": ["build"],
 			"cache": true,
 			"inputs": ["mockedTests", { "env": "HEVY_TEST_REPORT_MODE" }],
 			"outputs": ["{workspaceRoot}/coverage/mocked"]
@@ -118,6 +126,7 @@
 		},
 		"test:worker-http": {
 			"cache": false,
+			"parallelism": false,
 			"inputs": ["validationInputs"]
 		},
 		"test:pack": {
@@ -132,6 +141,10 @@
 		"test:cli": {
 			"cache": true,
 			"inputs": ["cliTests"]
+		},
+		"test:cli:safe": {
+			"cache": false,
+			"inputs": ["validationInputs"]
 		},
 		"test:pack:cli": {
 			"executor": "nx:run-commands",
@@ -163,8 +176,7 @@
 		},
 		"worker:dry-run": {
 			"cache": false,
-			"inputs": ["validationInputs"],
-			"outputs": ["{workspaceRoot}/.wrangler/dry-run"]
+			"inputs": ["validationInputs"]
 		},
 		"build": {
 			"cache": false,
@@ -189,13 +201,20 @@
 				"check:publint",
 				"test:integration",
 				"test:nightly",
-				"test:worker-http:live"
+				"test:worker-http:live",
+				"test:performance"
 			],
 			"inputs": ["validationInputs"]
 		},
 		"pre-push": {
 			"executor": "nx:noop",
-			"dependsOn": ["check:types", "check:changeset", "test:pr"],
+			"dependsOn": [
+				"check",
+				"check:types",
+				"check:control-plane",
+				"check:changeset",
+				"test:pr"
+			],
 			"inputs": ["validationInputs"]
 		},
 		"sync:server-manifest": {
@@ -216,7 +235,7 @@
 			"cache": false,
 			"dependsOn": ["build"],
 			"options": {
-				"command": "mise exec -- vitest run tests/performance/performance.test.ts"
+				"command": "mise exec -- node scripts/testing/run-vitest-lane.mjs performance"
 			},
 			"outputs": ["{workspaceRoot}/test-results/performance/summary.json"],
 			"inputs": ["validationInputs"]
@@ -262,7 +281,7 @@
 		"worker:deploy": {
 			"executor": "nx:run-commands",
 			"options": {
-				"command": "cross-env WRANGLER_MODE=production wrangler deploy --x-new-config --env production"
+				"command": "pnpm --dir packages/worker exec cf deploy --mode production"
 			},
 			"cache": false,
 			"inputs": ["validationInputs"]

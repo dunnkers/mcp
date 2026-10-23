@@ -5,16 +5,13 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import {
 	createHevyMcpServer,
 	createSafeErrorDiagnostic,
+	formatSafeErrorLogMessage,
+	isClientTransportError,
 	preloadHevyToolSchemas,
 	type CreateHevyMcpServerOptions,
 	type HevyClientFactoryContext,
 } from "@hevy-mcp/core";
-import {
-	createHevyClient,
-	isHevyHttpError,
-	type HevyClient,
-	type HevyRequestOptions,
-} from "@hevy-mcp/hevy-client";
+import { createHevyClient, type HevyClient } from "@hevy-mcp/hevy-client";
 import {
 	createHevyOAuthProvider,
 	hasOAuthAccessTokenFormat,
@@ -33,11 +30,41 @@ import {
 	getCloudflareColo,
 	getCloudflareGeography,
 } from "./worker-telemetry.js";
-import { validateHevyApiKeyResilient } from "./validation-cache.js";
+import {
+	createWorkerFeedbackRecorder,
+	isFeedbackToolCall,
+} from "./worker-feedback.js";
+import {
+	hasCachedValidation,
+	validateHevyApiKey,
+	validateHevyApiKeyResilient,
+	WORKER_VALIDATION_TIMEOUT_MS,
+} from "./validation-cache.js";
+
+import {
+	CORS_ALLOWED_HEADERS,
+	CORS_ALLOWED_METHODS,
+	corsHeaders,
+	DEFAULT_ALLOWED_ORIGINS,
+	healthResponseWithCors,
+	parseAllowedOrigins,
+	parseBearerApiKey,
+	resolveHevyApiBaseUrl,
+	response,
+	validateOrigin,
+	withCors,
+	type WorkerEnv,
+} from "./worker-http-helpers.js";
+
+export {
+	DEFAULT_ALLOWED_ORIGINS,
+	parseAllowedOrigins,
+	parseBearerApiKey,
+	type WorkerEnv,
+};
 
 const MCP_PATH = "/mcp";
-const OAUTH_AUTHORIZE_PATH = "/authorize";
-const HEVY_API_BASE_URL = "https://api.hevyapp.com";
+const HEALTH_PATH = "/health";
 
 /**
  * Warm the tool-schema memo at module scope so the per-isolate conversion
@@ -46,26 +73,18 @@ const HEVY_API_BASE_URL = "https://api.hevyapp.com";
  * the Worker CPU budget by reusing the memoized tool schemas.
  */
 preloadHevyToolSchemas();
-const CORS_ALLOWED_HEADERS =
-	"Authorization, Content-Type, Accept, MCP-Protocol-Version";
-const CORS_ALLOWED_METHODS = "POST, OPTIONS";
-export const DEFAULT_ALLOWED_ORIGINS = [
-	"https://claude.ai", // Anthropic Claude web connector
-	"https://www.claude.ai", // Anthropic Claude web connector
-	"https://claude.com", // Anthropic Claude web connector
-	"https://www.claude.com", // Anthropic Claude web connector
-	"https://chatgpt.com", // OpenAI ChatGPT connectors
-	"https://chat.openai.com", // Legacy ChatGPT web origin
-	"https://vscode.dev", // VS Code for the Web
-	"https://github.dev", // github.dev web editor
-] as const;
-
-/** Reserve most of the invocation budget for MCP execution after validation. */
-const WORKER_VALIDATION_TIMEOUT_MS = 5_000;
 
 class FallbackSpan implements Span {
 	get isTraced(): boolean {
 		return false;
+	}
+
+	/**
+	 * Workers `Span` requires a span context; the fallback carries no real
+	 * trace identifiers so the canonical empty context keeps it inert.
+	 */
+	spanContext(): TracingSpanContext {
+		return { traceId: "", spanId: "", traceFlags: 0 };
 	}
 
 	setAttribute(_key: string, _value: boolean | number | string): this {
@@ -75,6 +94,37 @@ class FallbackSpan implements Span {
 	setAttributes(
 		_attributes: Record<string, boolean | number | string | undefined>,
 	): this {
+		return this;
+	}
+
+	recordException(
+		_exception:
+			| string
+			| {
+					code: string | number;
+					name?: string;
+					message?: string;
+					stack?: string;
+			  }
+			| {
+					code?: string | number;
+					name: string;
+					message?: string;
+					stack?: string;
+			  }
+			| {
+					code?: string | number;
+					name?: string;
+					message: string;
+					stack?: string;
+			  },
+	): void {}
+
+	updateName(_name: string): this {
+		return this;
+	}
+
+	setStatus(_status: TracingSpanStatus): this {
 		return this;
 	}
 
@@ -105,6 +155,9 @@ const FALLBACK_EXECUTION_CONTEXT = {
 		startSpan(_name: string): Span {
 			return new FallbackSpan();
 		},
+		getActiveSpan(): Span | undefined {
+			return undefined;
+		},
 		Span: FallbackSpan,
 	},
 } satisfies ExecutionContext;
@@ -113,21 +166,6 @@ function requireExecutionContext(
 	context: ExecutionContext | undefined,
 ): ExecutionContext {
 	return context ?? FALLBACK_EXECUTION_CONTEXT;
-}
-
-export interface WorkerEnv {
-	// Trusted deployment/test binding; invalid values fail closed before auth.
-	HEVY_API_BASE_URL?: string;
-	// Optional comma-separated exact-origin override. When omitted, the known
-	// browser client origins above are allowed.
-	MCP_ALLOWED_ORIGINS?: string;
-	// Development-only escape hatch for local and preview browser clients.
-	// Production deployments must leave this unset.
-	MCP_DISABLE_ORIGIN_CHECK?: string;
-	// Optional KV namespace binding. When present, the Worker additionally
-	// exposes OAuth 2.1 endpoints for remote MCP clients such as Claude.ai.
-	// When absent, behavior is identical to the pre-OAuth Worker.
-	OAUTH_KV?: unknown;
 }
 
 interface WorkerDependencies {
@@ -142,26 +180,18 @@ interface WorkerDependencies {
 		lifecycleSignal?: AbortSignal,
 		executionDeadline?: number,
 		observer?: CreateHevyMcpServerOptions["observer"],
-	) => McpServer;
+		feedbackRecorder?: CreateHevyMcpServerOptions["feedbackRecorder"],
+	) => Promise<McpServer>;
 	createTransport?: () => WebStandardStreamableHTTPServerTransport;
 	createObserver?: (
 		options: WorkerToolObserverOptions,
 	) => CreateHevyMcpServerOptions["observer"];
+	createFeedbackRecorder?: (
+		env: WorkerEnv,
+	) => CreateHevyMcpServerOptions["feedbackRecorder"];
 }
 
 type ResolvedWorkerDependencies = Required<WorkerDependencies>;
-
-export function parseBearerApiKey(authorization: string | null): string | null {
-	if (!authorization) return null;
-	const match = /^Bearer ([^\s,]+)$/i.exec(authorization);
-	return match?.[1] ?? null;
-}
-
-export function parseAllowedOrigins(value: string | undefined): Set<string> {
-	const origins =
-		value === undefined ? DEFAULT_ALLOWED_ORIGINS : value.split(",");
-	return new Set(origins.map((origin) => origin.trim()).filter(Boolean));
-}
 
 interface WorkerRequestLogContext {
 	requestId: string;
@@ -196,92 +226,6 @@ function createRequestLogContext(
 	};
 }
 
-function validateOrigin(
-	request: Request,
-	env: WorkerEnv,
-): string | null | Response {
-	const origin = request.headers.get("origin");
-	const url = new URL(request.url);
-	if (!origin) return null;
-	if (
-		origin === "null" &&
-		request.method === "POST" &&
-		url.pathname === OAUTH_AUTHORIZE_PATH &&
-		isOAuthEnabled(env)
-	) {
-		// Sandboxed browser contexts submit OAuth consent forms with an opaque
-		// origin. Keep this exception route-specific; never allow it for MCP.
-		return origin;
-	}
-	if (env.MCP_DISABLE_ORIGIN_CHECK?.trim().toLowerCase() === "true") {
-		return origin;
-	}
-	if (origin === url.origin) return origin;
-	if (!parseAllowedOrigins(env.MCP_ALLOWED_ORIGINS).has(origin)) {
-		console.warn({
-			event: "worker.origin_rejected",
-			requestId: request.headers.get("cf-ray") ?? null,
-			method: request.method,
-			path: url.pathname,
-			origin,
-		});
-		return new Response("Forbidden", {
-			status: 403,
-			headers: { Vary: "Origin" },
-		});
-	}
-	return origin;
-}
-
-function corsHeaders(origin: string): Headers {
-	return new Headers({
-		"Access-Control-Allow-Origin": origin,
-		Vary: "Origin",
-	});
-}
-
-function withCors(response: Response, origin: string | null): Response {
-	if (!origin) return response;
-	const headers = new Headers(response.headers);
-	for (const [key, value] of corsHeaders(origin)) headers.set(key, value);
-	return new Response(response.body, {
-		status: response.status,
-		statusText: response.statusText,
-		headers,
-	});
-}
-
-function response(
-	message: string,
-	status: number,
-	origin: string | null,
-	headers?: Headers | Record<string, string>,
-): Response {
-	return withCors(new Response(message, { status, headers }), origin);
-}
-
-function resolveHevyApiBaseUrl(value: string | undefined): string {
-	if (value === undefined) return HEVY_API_BASE_URL;
-
-	let url: URL;
-	try {
-		url = new URL(value);
-	} catch {
-		throw new TypeError("Invalid Hevy API base URL");
-	}
-	if (
-		(url.protocol !== "http:" && url.protocol !== "https:") ||
-		url.username ||
-		url.password ||
-		url.search ||
-		url.hash ||
-		url.pathname.replace(/\/+$/, "")
-	) {
-		throw new TypeError("Invalid Hevy API base URL");
-	}
-	return url.origin;
-}
-
 function createDefaultValidationClient(
 	apiKey: string,
 	baseUrl: string,
@@ -302,17 +246,19 @@ function createDefaultRequestClient(
 	return createHevyClient({ apiKey, baseUrl, onLog });
 }
 
-function createDefaultServer(
+async function createDefaultServer(
 	createClient: CreateHevyMcpServerOptions["createClient"],
 	lifecycleSignal?: AbortSignal,
 	executionDeadline?: number,
 	observer?: CreateHevyMcpServerOptions["observer"],
-): McpServer {
-	return createHevyMcpServer({
+	feedbackRecorder?: CreateHevyMcpServerOptions["feedbackRecorder"],
+): Promise<McpServer> {
+	return await createHevyMcpServer({
 		createClient,
 		observer,
 		lifecycleSignal,
 		executionDeadline,
+		feedbackRecorder,
 	});
 }
 
@@ -322,27 +268,44 @@ function createDefaultTransport(): WebStandardStreamableHTTPServerTransport {
 	});
 }
 
+function logWorkerWarning(
+	context: string,
+	error: Error | string,
+	fields: Partial<WorkerRequestLogContext> = {},
+): void {
+	const diagnostic = createSafeErrorDiagnostic(error);
+	console.warn({
+		event: "worker.warning",
+		message: formatSafeErrorLogMessage(context, error, diagnostic),
+		context,
+		...fields,
+		...diagnostic,
+	});
+}
+
 function logWorkerFailure(
 	context: string,
 	error: Error | string,
 	fields: Partial<WorkerRequestLogContext> = {},
 ): void {
+	const diagnostic = createSafeErrorDiagnostic(error);
 	console.error({
 		event: "worker.error",
+		message: formatSafeErrorLogMessage(context, error, diagnostic),
 		context,
 		...fields,
-		...createSafeErrorDiagnostic(error),
+		...diagnostic,
 	});
 }
 function logOAuthResponse(
 	context: WorkerRequestLogContext,
-	status: number,
+	statusCode: number,
 ): void {
-	if (status < 400) return;
+	if (statusCode < 400) return;
 	console.warn({
 		event: "worker.oauth_response",
 		...context,
-		status,
+		status: statusCode,
 	});
 }
 
@@ -368,38 +331,15 @@ function resolveWorkerDependencies(
 		createObserver:
 			dependencies.createObserver ??
 			((options) => createWorkerToolObserver(options)),
+		createFeedbackRecorder:
+			dependencies.createFeedbackRecorder ??
+			((env) =>
+				createWorkerFeedbackRecorder(
+					env.OTEL_COLLECTOR_TOKEN,
+					fetch,
+					env.HEVY_MCP_TELEMETRY !== "0",
+				)),
 	};
-}
-
-async function validateHevyApiKey(
-	apiKey: string,
-	hevyApiBaseUrl: string,
-	createValidationClient: ResolvedWorkerDependencies["createValidationClient"],
-	options?: HevyRequestOptions,
-): Promise<HevyApiKeyValidation> {
-	try {
-		const validationDeadline = Math.min(
-			options?.deadline ?? Number.POSITIVE_INFINITY,
-			Date.now() + WORKER_VALIDATION_TIMEOUT_MS,
-		);
-		await createValidationClient(apiKey, hevyApiBaseUrl).getUserInfo({
-			...options,
-			deadline: validationDeadline,
-		});
-		return "valid";
-	} catch (error) {
-		if (options?.signal?.aborted) throw error;
-		if (isHevyHttpError(error) && error.outcome === "deadline_exceeded") {
-			throw error;
-		}
-		if (
-			isHevyHttpError(error) &&
-			(error.status === 401 || error.status === 403)
-		) {
-			return "invalid";
-		}
-		throw error;
-	}
 }
 
 async function serveMcpRequest(
@@ -408,26 +348,36 @@ async function serveMcpRequest(
 	hevyApiBaseUrl: string,
 	dependencies: ResolvedWorkerDependencies,
 	deadline: number,
+	env: WorkerEnv,
+	feedbackOnly: boolean,
 ): Promise<Response> {
 	try {
-		const geography = getCloudflareGeography(request);
-		const observer = dependencies.createObserver({
-			userHash: await createWorkerUserHash(apiKey),
-			cloudflareColo: getCloudflareColo(request),
-			geoLocalityName: geography.localityName,
-			geoLocalityRegion: geography.localityRegion,
-			geoCountryCode: geography.countryCode,
-		});
-		const server = dependencies.createServer(
+		let observer: CreateHevyMcpServerOptions["observer"];
+		if (!feedbackOnly) {
+			const geography = getCloudflareGeography(request);
+			observer = dependencies.createObserver({
+				userHash: await createWorkerUserHash(apiKey),
+				cloudflareColo: getCloudflareColo(request),
+				geoLocalityName: geography.localityName,
+				geoLocalityRegion: geography.localityRegion,
+				geoCountryCode: geography.countryCode,
+			});
+		}
+		const server = await dependencies.createServer(
 			({ onLog }) =>
 				dependencies.createRequestClient(apiKey, hevyApiBaseUrl, onLog),
 			request.signal,
 			deadline,
 			observer,
+			dependencies.createFeedbackRecorder(env),
 		);
 		const transport = dependencies.createTransport();
 		transport.onerror = (error) => {
-			logWorkerFailure("streamable-http-transport", error);
+			if (isClientTransportError(error)) {
+				logWorkerWarning("streamable-http-transport", error);
+			} else {
+				logWorkerFailure("streamable-http-transport", error);
+			}
 		};
 		await server.connect(transport);
 		return await transport.handleRequest(request);
@@ -452,6 +402,8 @@ export function createWorkerHandler(dependencies: WorkerDependencies = {}) {
 		ctx?: ExecutionContext,
 	): Promise<Response> {
 		const url = new URL(request.url);
+		if (url.pathname === HEALTH_PATH)
+			return healthResponseWithCors(request, env);
 		if (url.pathname !== MCP_PATH)
 			return new Response("Not found", { status: 404 });
 
@@ -487,41 +439,50 @@ export function createWorkerHandler(dependencies: WorkerDependencies = {}) {
 		}
 
 		const deadline = Date.now() + WORKER_INVOCATION_TIMEOUT_MS;
+		const feedbackOnly = await isFeedbackToolCall(request);
+		const cachedFeedbackAuthorization =
+			feedbackOnly && (await hasCachedValidation(apiKey, env));
 		let validation: HevyApiKeyValidation;
-		try {
-			validation = await validateHevyApiKeyResilient(
-				apiKey,
-				hevyApiBaseUrl,
-				resolved.createValidationClient,
-				validateHevyApiKey,
-				env,
-				{
-					signal: request.signal,
-					// One absolute deadline for the whole validation phase, shared
-					// across the wrapper's retries. Passing the full invocation
-					// deadline instead would let each retry's inner validateHevyApiKey
-					// re-anchor its own now+WORKER_VALIDATION_TIMEOUT_MS window, so
-					// three attempts could consume ~3x the budget this cap reserves
-					// for MCP execution.
-					deadline: Math.min(
-						deadline,
-						Date.now() + WORKER_VALIDATION_TIMEOUT_MS,
-					),
-				},
-				// Pass the context through as-is: when it's absent (direct callers),
-				// the wrapper awaits the cache write inline rather than handing it to
-				// a no-op waitUntil that would drop it.
-				ctx,
-			);
-		} catch (error) {
-			const normalizedError = error instanceof Error ? error : String(error);
-			logWorkerFailure("hevy-key-validation", normalizedError);
-			return executionHttpResponse(
-				normalizedError,
-				"Unable to validate the Hevy API key",
-				502,
-				origin,
-			);
+		if (cachedFeedbackAuthorization) {
+			// This key was confirmed valid by a prior request. Feedback does not
+			// call Hevy, so it can still be reported when the upstream is down.
+			validation = "valid";
+		} else {
+			try {
+				validation = await validateHevyApiKeyResilient(
+					apiKey,
+					hevyApiBaseUrl,
+					resolved.createValidationClient,
+					validateHevyApiKey,
+					env,
+					{
+						signal: request.signal,
+						// One absolute deadline for the whole validation phase, shared
+						// across the wrapper's retries. Passing the full invocation
+						// deadline instead would let each retry's inner validateHevyApiKey
+						// re-anchor its own now+WORKER_VALIDATION_TIMEOUT_MS window, so
+						// three attempts could consume ~3x the budget this cap reserves
+						// for MCP execution.
+						deadline: Math.min(
+							deadline,
+							Date.now() + WORKER_VALIDATION_TIMEOUT_MS,
+						),
+					},
+					// Pass the context through as-is: when it's absent (direct callers),
+					// the wrapper awaits the cache write inline rather than handing it to
+					// a no-op waitUntil that would drop it.
+					ctx,
+				);
+			} catch (error) {
+				const normalizedError = error instanceof Error ? error : String(error);
+				logWorkerFailure("hevy-key-validation", normalizedError);
+				return executionHttpResponse(
+					normalizedError,
+					"Unable to validate the Hevy API key",
+					502,
+					origin,
+				);
+			}
 		}
 		if (validation === "invalid") {
 			return response("Unauthorized", 401, origin, {
@@ -536,6 +497,8 @@ export function createWorkerHandler(dependencies: WorkerDependencies = {}) {
 				hevyApiBaseUrl,
 				resolved,
 				deadline,
+				env,
+				feedbackOnly,
 			),
 			origin,
 		);
@@ -544,52 +507,58 @@ export function createWorkerHandler(dependencies: WorkerDependencies = {}) {
 
 function createWorkerOAuthProvider(
 	resolved: ResolvedWorkerDependencies,
+	resource?: string,
 ): HevyOAuthWorker<WorkerEnv> {
-	return createHevyOAuthProvider<WorkerEnv>({
-		validateApiKey: async (apiKey, env, signal, deadline) => {
-			let hevyApiBaseUrl: string;
-			try {
-				hevyApiBaseUrl = resolveHevyApiBaseUrl(env.HEVY_API_BASE_URL);
-			} catch {
-				return "config-error";
-			}
-			// No ExecutionContext reaches this dependency today (the
-			// HevyOAuthDependencies.validateApiKey interface doesn't thread one),
-			// so the cache write stays awaited here rather than deferred via
-			// waitUntil.
-			return validateHevyApiKeyResilient(
-				apiKey,
-				hevyApiBaseUrl,
-				resolved.createValidationClient,
-				validateHevyApiKey,
-				env,
-				{
-					signal,
-					// Cap the whole validation phase (see the bearer path) so the
-					// wrapper's retries share one deadline instead of re-anchoring.
-					deadline: Math.min(
-						deadline ?? Date.now() + WORKER_INVOCATION_TIMEOUT_MS,
-						Date.now() + WORKER_VALIDATION_TIMEOUT_MS,
-					),
-				},
-			);
+	return createHevyOAuthProvider<WorkerEnv>(
+		{
+			validateApiKey: async (apiKey, env, signal, deadline) => {
+				let hevyApiBaseUrl: string;
+				try {
+					hevyApiBaseUrl = resolveHevyApiBaseUrl(env.HEVY_API_BASE_URL);
+				} catch {
+					return "config-error";
+				}
+				// No ExecutionContext reaches this dependency today (the
+				// HevyOAuthDependencies.validateApiKey interface doesn't thread one),
+				// so the cache write stays awaited here rather than deferred via
+				// waitUntil.
+				return validateHevyApiKeyResilient(
+					apiKey,
+					hevyApiBaseUrl,
+					resolved.createValidationClient,
+					validateHevyApiKey,
+					env,
+					{
+						signal,
+						// Cap the whole validation phase (see the bearer path) so the
+						// wrapper's retries share one deadline instead of re-anchoring.
+						deadline: Math.min(
+							deadline ?? Date.now() + WORKER_INVOCATION_TIMEOUT_MS,
+							Date.now() + WORKER_VALIDATION_TIMEOUT_MS,
+						),
+					},
+				);
+			},
+			serveMcp: async (request, env, apiKey, deadline) => {
+				let hevyApiBaseUrl: string;
+				try {
+					hevyApiBaseUrl = resolveHevyApiBaseUrl(env.HEVY_API_BASE_URL);
+				} catch {
+					return new Response("Worker configuration error", { status: 500 });
+				}
+				return serveMcpRequest(
+					request,
+					apiKey,
+					hevyApiBaseUrl,
+					resolved,
+					deadline ?? Date.now() + WORKER_INVOCATION_TIMEOUT_MS,
+					env,
+					await isFeedbackToolCall(request),
+				);
+			},
 		},
-		serveMcp: async (request, env, apiKey, deadline) => {
-			let hevyApiBaseUrl: string;
-			try {
-				hevyApiBaseUrl = resolveHevyApiBaseUrl(env.HEVY_API_BASE_URL);
-			} catch {
-				return new Response("Worker configuration error", { status: 500 });
-			}
-			return serveMcpRequest(
-				request,
-				apiKey,
-				hevyApiBaseUrl,
-				resolved,
-				deadline ?? Date.now() + WORKER_INVOCATION_TIMEOUT_MS,
-			);
-		},
-	});
+		resource,
+	);
 }
 
 /**
@@ -606,7 +575,16 @@ export function createWorkerFetchHandler(
 ) {
 	const resolved = resolveWorkerDependencies(dependencies);
 	const legacyHandler = createWorkerHandler(dependencies);
-	const oauthProvider = createWorkerOAuthProvider(resolved);
+	let oauthProvider: HevyOAuthWorker<WorkerEnv> | undefined;
+	const getOAuthProvider = (env: WorkerEnv): HevyOAuthWorker<WorkerEnv> => {
+		// Runtime bindings are available on fetch; the deployment value is stable
+		// for the isolate, so keep one provider instance.
+		oauthProvider ??= createWorkerOAuthProvider(
+			resolved,
+			env.OAUTH_RESOURCE?.trim() || undefined,
+		);
+		return oauthProvider;
+	};
 
 	return async function handleWorkerFetch(
 		request: Request,
@@ -617,6 +595,11 @@ export function createWorkerFetchHandler(
 		const startedAt = Date.now();
 		let responseStatus: number | null = null;
 		try {
+			if (new URL(request.url).pathname === HEALTH_PATH) {
+				const health = healthResponseWithCors(request, env);
+				responseStatus = health.status;
+				return health;
+			}
 			if (!isOAuthEnabled(env)) {
 				if (env.OAUTH_KV != null) {
 					logWorkerFailure(
@@ -651,23 +634,23 @@ export function createWorkerFetchHandler(
 					responseStatus = legacyResponse.status;
 					return legacyResponse;
 				}
-				const oauthResponse = await oauthProvider.fetch(
+				const providerResponse = await getOAuthProvider(env).fetch(
 					request,
 					env,
 					requireExecutionContext(ctx),
 				);
-				responseStatus = oauthResponse.status;
+				responseStatus = providerResponse.status;
 				logOAuthResponse(logContext, responseStatus);
-				return withCors(oauthResponse, origin);
+				return withCors(providerResponse, origin);
 			}
-			const oauthResponse = await oauthProvider.fetch(
+			const providerResponse = await getOAuthProvider(env).fetch(
 				request,
 				env,
 				requireExecutionContext(ctx),
 			);
-			responseStatus = oauthResponse.status;
+			responseStatus = providerResponse.status;
 			logOAuthResponse(logContext, responseStatus);
-			return withCors(oauthResponse, origin);
+			return withCors(providerResponse, origin);
 		} catch (error) {
 			const normalizedError = error instanceof Error ? error : String(error);
 			logWorkerFailure("request", normalizedError, logContext);

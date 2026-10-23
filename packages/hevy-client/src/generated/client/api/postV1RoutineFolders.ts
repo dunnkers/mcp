@@ -3,49 +3,28 @@
  * Do not edit manually.
  */
 
-import fetch from "../../../fetch.ts";
+import type { Options, Unwrappable, RequestResult } from "../../.kubb/client";
 import type {
-  Client,
-  RequestConfig,
-  ResponseErrorConfig,
-} from "../../../fetch.ts";
-import type {
-  PostV1RoutineFoldersMutationRequest,
-  PostV1RoutineFoldersMutationResponse,
-  PostV1RoutineFoldersHeaderParams,
-  PostV1RoutineFolders400,
-} from "../types/PostV1RoutineFolders.ts";
-
-function getPostV1RoutineFoldersUrl() {
-  const res = { method: "POST", url: `/v1/routine_folders` as const };
-  return res;
-}
+  PostV1RoutineFoldersOptions,
+  PostV1RoutineFoldersResponses,
+} from "../types/PostV1RoutineFolders";
+import { client, withUnwrap } from "../../.kubb/client";
 
 /**
  * @summary Create a new routine folder. The folder will be created at index 0, and all other folders will have their indexes incremented.
  * {@link /v1/routine_folders}
  */
-export async function postV1RoutineFolders(
-  data: PostV1RoutineFoldersMutationRequest,
-  headers: PostV1RoutineFoldersHeaderParams,
-  config: Partial<RequestConfig<PostV1RoutineFoldersMutationRequest>> & {
-    client?: Client;
-  } = {},
-) {
-  const { client: request = fetch, ...requestConfig } = config;
+export function postV1RoutineFolders<ThrowOnError extends boolean = true>(
+  options: Options<PostV1RoutineFoldersOptions, ThrowOnError>,
+): Unwrappable<RequestResult<PostV1RoutineFoldersResponses, ThrowOnError>> {
+  const { client: request = client, ...config } = options;
 
-  const requestData = data;
-
-  const res = await request<
-    PostV1RoutineFoldersMutationResponse,
-    ResponseErrorConfig<PostV1RoutineFolders400>,
-    PostV1RoutineFoldersMutationRequest
-  >({
-    method: "POST",
-    url: getPostV1RoutineFoldersUrl().url.toString(),
-    data: requestData,
-    ...requestConfig,
-    headers: { ...headers, ...requestConfig.headers },
-  });
-  return res.data;
+  return withUnwrap(
+    request({
+      method: "POST",
+      url: "/v1/routine_folders",
+      ...config,
+      throwOnError: config.throwOnError ?? true,
+    }) as Promise<RequestResult<PostV1RoutineFoldersResponses, ThrowOnError>>,
+  );
 }

@@ -1,14 +1,12 @@
-import type {
-	PutV1RoutinesRoutineid200,
-	Routine,
-} from "@hevy-mcp/hevy-client/types";
-import { createRoutineOutputSchema } from "../utils/output-schemas.js";
+import { Effect } from "effect";
+import type { Routine } from "@hevy-mcp/hevy-client/types";
+import { createRoutineOutputSchema } from "../protocol/output-schemas.js";
 import {
 	createRoutineResponse,
 	routineResponse,
 	routinesResponse,
 	updateRoutineResponse,
-} from "../utils/response-contracts.js";
+} from "../protocol/response-contracts.js";
 import {
 	createAnnotations,
 	readOnlyAnnotations,
@@ -19,12 +17,14 @@ import {
 	nonEmptyId,
 	paginationFields,
 	createRoutineInputFields,
+	createRoutineInputParser,
 	updateRoutineInputFields,
 } from "./input-schemas.js";
-import { buildRoutinePayload } from "./mutation-semantics.js";
 import type { ToolDefinition } from "./define-tool.js";
 import type { ToolRuntime } from "./tool-runtime.js";
-import type { PaginatedToolResult } from "../utils/response-contracts.js";
+import type { PaginatedToolResult } from "../protocol/response-contracts.js";
+import { HevyOperationsService } from "../runtime/effect-services.js";
+import { operationEffect, requireOperation } from "./operation-helpers.js";
 
 const getRoutinesSchema = paginationFields({
 	defaultPageSize: 5,
@@ -47,9 +47,14 @@ const getRoutinesDefinition: ToolDefinition<
 	annotations: readOnlyAnnotations("Get Routines"),
 	responseContract: routinesResponse,
 	execute: (runtime: ToolRuntime, { page, page_size }) =>
-		runtime
-			.getOperations()
-			.routines.list.execute({ page, pageSize: page_size }, runtime.execution),
+		operationEffect(
+			requireOperation(
+				runtime.service(HevyOperationsService).routines.list,
+				"routines.list",
+			),
+			{ page, pageSize: page_size },
+			runtime.execution,
+		),
 };
 
 const getRoutineSchema = { routine_id: nonEmptyId } as const;
@@ -73,12 +78,15 @@ const getRoutineDefinition: ToolDefinition<
 	outputSchema: routineResponse.outputSchema,
 	annotations: readOnlyAnnotations("Get Routine"),
 	responseContract: routineResponse,
-	execute: async (runtime, { routine_id }) => {
-		const data = await runtime
-			.getOperations()
-			.routines.get.execute({ routineId: routine_id }, runtime.execution);
-		return { ...data, routine_id };
-	},
+	execute: (runtime, { routine_id }) =>
+		operationEffect(
+			requireOperation(
+				runtime.service(HevyOperationsService).routines.get,
+				"routines.get",
+			),
+			{ routineId: routine_id },
+			runtime.execution,
+		).pipe(Effect.map((data) => ({ ...data, routine_id }))),
 };
 
 const createRoutineSchema = createRoutineInputFields;
@@ -97,26 +105,26 @@ const createRoutineDefinition: ToolDefinition<
 	description:
 		"Writes a reusable routine; use create-workout for completed sessions. Retries can create duplicates.",
 	inputSchema: createRoutineSchema,
+	inputParser: createRoutineInputParser,
 	kind: "write",
 	outputSchema: createRoutineOutputSchema,
 	annotations: createAnnotations("Create Routine"),
 	responseContract: createRoutineResponse,
-	execute: async (runtime, args) => {
-		const { payload, usesRepRanges } = buildRoutinePayload(
-			args.routine,
-			"create",
-		);
-		const data: Routine | undefined = await runtime
-			.getClient()
-			.createRoutine({ routine: payload });
-		return { routine: data, usesRepRanges };
-	},
+	execute: (runtime, args) =>
+		operationEffect(
+			requireOperation(
+				runtime.service(HevyOperationsService).routines.create,
+				"routines.create",
+			),
+			{ routine: args.routine },
+			runtime.execution,
+		),
 };
 
 const updateRoutineSchema = updateRoutineInputFields;
 
 type UpdateRoutineResult = {
-	routine: PutV1RoutinesRoutineid200 | null | undefined;
+	routine: Routine | null | undefined;
 	routine_id: string;
 	usesRepRanges: boolean;
 };
@@ -132,18 +140,22 @@ const updateRoutineDefinition: ToolDefinition<
 	inputSchema: updateRoutineSchema,
 	kind: "write",
 	annotations: updateAnnotations("Update Routine"),
+	outputSchema: updateRoutineResponse.outputSchema,
 	responseContract: updateRoutineResponse,
-	execute: async (runtime, args) => {
-		const { routine_id } = args;
-		const { payload, usesRepRanges } = buildRoutinePayload(
-			args.routine,
-			"update",
-		);
-		const data: PutV1RoutinesRoutineid200 = await runtime
-			.getClient()
-			.updateRoutine(routine_id, { routine: payload });
-		return { routine: data, routine_id, usesRepRanges };
-	},
+	execute: (runtime, args) =>
+		operationEffect(
+			requireOperation(
+				runtime.service(HevyOperationsService).routines.update,
+				"routines.update",
+			),
+			{ routineId: args.routine_id, routine: args.routine },
+			runtime.execution,
+		).pipe(
+			Effect.map((data) => ({
+				...data,
+				routine_id: args.routine_id,
+			})),
+		),
 };
 
 export const routineToolDefinitions = [

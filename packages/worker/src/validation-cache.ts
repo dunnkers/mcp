@@ -1,15 +1,19 @@
 /// <reference types="@cloudflare/workers-types" />
 
+import { Cause, Duration, Effect, Schedule } from "effect";
 import { createSafeErrorDiagnostic } from "@hevy-mcp/core";
 import {
 	isHevyHttpError,
 	type HevyClient,
 	type HevyRequestOptions,
 } from "@hevy-mcp/hevy-client";
+import { interruptOnAbortSignal } from "@hevy-mcp/hevy-client/internal";
 import { isOAuthEnabled, type HevyApiKeyValidation } from "./worker-oauth.js";
 
 /** How long a successful Hevy key validation is trusted before re-checking upstream. */
 export const VALIDATION_CACHE_TTL_SECONDS = 900;
+/** Reserve most of the invocation budget for MCP execution after validation. */
+export const WORKER_VALIDATION_TIMEOUT_MS = 5_000;
 
 const VALIDATION_CACHE_KEY_PREFIX = "keyvalid:";
 /** The only value `cacheValidation` ever writes; a KV read must match it exactly. */
@@ -20,6 +24,7 @@ export const MEMORY_CACHE_MAX_ENTRIES = 256;
 /** Structural env shape this module needs; kept independent of `WorkerEnv`. */
 export interface ValidationCacheEnv {
 	OAUTH_KV?: unknown;
+	HEVY_VALIDATION_RETRY_DELAYS_MS?: string;
 }
 
 interface ValidationCacheKvNamespace {
@@ -133,8 +138,70 @@ export type HevyKeyValidator = (
 	options?: HevyRequestOptions,
 ) => Promise<HevyApiKeyValidation>;
 
-const VALIDATION_RETRY_MAX_ATTEMPTS = 3;
-const VALIDATION_RETRY_DELAYS_MS = [300, 600];
+export async function validateHevyApiKey(
+	apiKey: string,
+	hevyApiBaseUrl: string,
+	createValidationClient: (apiKey: string, baseUrl: string) => HevyClient,
+	options?: HevyRequestOptions,
+): Promise<HevyApiKeyValidation> {
+	try {
+		const validationDeadline = Math.min(
+			options?.deadline ?? Number.POSITIVE_INFINITY,
+			Date.now() + WORKER_VALIDATION_TIMEOUT_MS,
+		);
+		await createValidationClient(apiKey, hevyApiBaseUrl).getUserInfo({
+			...options,
+			deadline: validationDeadline,
+		});
+		return "valid";
+	} catch (error) {
+		if (options?.signal?.aborted) throw error;
+		if (isHevyHttpError(error) && error.outcome === "deadline_exceeded") {
+			throw error;
+		}
+		if (
+			isHevyHttpError(error) &&
+			(error.status === 401 || error.status === 403)
+		) {
+			return "invalid";
+		}
+		throw error;
+	}
+}
+
+export const DEFAULT_VALIDATION_RETRY_DELAYS_MS = [300, 600] as const;
+
+export function parseValidationRetryDelays(raw?: string): readonly number[] {
+	if (!raw) return DEFAULT_VALIDATION_RETRY_DELAYS_MS;
+	const tokens = raw.split(",");
+	const parsed: number[] = [];
+	for (const token of tokens) {
+		const trimmed = token.trim();
+		if (trimmed === "") return DEFAULT_VALIDATION_RETRY_DELAYS_MS;
+		const n = Number(trimmed);
+		if (!Number.isInteger(n) || n < 0) {
+			return DEFAULT_VALIDATION_RETRY_DELAYS_MS;
+		}
+		parsed.push(n);
+	}
+	return parsed.length > 0 ? parsed : DEFAULT_VALIDATION_RETRY_DELAYS_MS;
+}
+
+function resolveValidationRetryDelays(
+	env?: ValidationCacheEnv,
+): readonly number[] {
+	const globalProcess = (
+		globalThis as {
+			readonly process?: {
+				readonly env?: Record<string, string | undefined>;
+			};
+		}
+	).process;
+	const raw =
+		env?.HEVY_VALIDATION_RETRY_DELAYS_MS ??
+		globalProcess?.env?.HEVY_VALIDATION_RETRY_DELAYS_MS;
+	return parseValidationRetryDelays(raw);
+}
 
 /**
  * Whether a failed validation attempt is worth retrying.
@@ -149,6 +216,7 @@ const VALIDATION_RETRY_DELAYS_MS = [300, 600];
  */
 function isRetryableValidationFailure<T>(error: T): boolean {
 	if (!isHevyHttpError(error)) return false;
+	if (error.outcome === "deadline_exceeded") return false;
 	const status = error.status;
 	if (status === 429) return false;
 	return (
@@ -171,22 +239,6 @@ function logValidationRetry<T>(
 	});
 }
 
-/** Resolves after `ms`, or immediately if `signal` is already/becomes aborted. */
-function delay(ms: number, signal?: AbortSignal): Promise<void> {
-	if (signal?.aborted) return Promise.resolve();
-	return new Promise((resolve) => {
-		const onAbort = () => {
-			clearTimeout(timer);
-			resolve();
-		};
-		const timer = setTimeout(() => {
-			signal?.removeEventListener("abort", onAbort);
-			resolve();
-		}, ms);
-		signal?.addEventListener("abort", onAbort, { once: true });
-	});
-}
-
 /**
  * Execution-context-like handle for deferring the cache write past the
  * response. Structural (not the full Cloudflare `ExecutionContext`) so this
@@ -194,6 +246,43 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
  */
 export interface WaitUntilHandle {
 	waitUntil(promise: Promise<unknown>): void;
+}
+
+function validationRetrySchedule(
+	options: HevyRequestOptions | undefined,
+	retryDelaysMs: readonly number[],
+): Schedule.Schedule<number, unknown, never> {
+	const maxAttempts = retryDelaysMs.length + 1;
+	return Schedule.recurs(retryDelaysMs.length).pipe(
+		Schedule.while((metadata: Schedule.Metadata<number, unknown>) => {
+			const delayMs = retryDelaysMs[metadata.attempt - 1];
+			if (
+				delayMs === undefined ||
+				!isRetryableValidationFailure(metadata.input)
+			) {
+				return false;
+			}
+			if (
+				options?.deadline !== undefined &&
+				Date.now() + delayMs >= options.deadline
+			) {
+				return false;
+			}
+			logValidationRetry(
+				metadata.attempt,
+				maxAttempts,
+				delayMs,
+				metadata.input,
+			);
+			return true;
+		}),
+		Schedule.addDelay((metadata) => {
+			const delayMs = retryDelaysMs[metadata.attempt - 1];
+			return Effect.succeed(
+				Duration.millis(delayMs === undefined ? 0 : delayMs),
+			);
+		}),
+	);
 }
 
 /**
@@ -216,55 +305,44 @@ export async function validateHevyApiKeyResilient(
 	options?: HevyRequestOptions,
 	executionContext?: WaitUntilHandle,
 ): Promise<HevyApiKeyValidation> {
+	if (options?.signal?.aborted) {
+		throw (
+			options.signal.reason ??
+			new DOMException("Validation request canceled", "AbortError")
+		);
+	}
 	if (await hasCachedValidation(apiKey, env)) return "valid";
 
-	for (let attempt = 1; attempt <= VALIDATION_RETRY_MAX_ATTEMPTS; attempt++) {
-		try {
-			const result = await validate(
-				apiKey,
-				hevyApiBaseUrl,
-				createValidationClient,
-				options,
-			);
-			if (result === "valid") {
-				const write = cacheValidation(apiKey, env);
-				if (executionContext) executionContext.waitUntil(write);
-				else await write;
-			}
-			return result;
-		} catch (error) {
-			if (options?.signal?.aborted) throw error;
-			if (isHevyHttpError(error) && error.outcome === "deadline_exceeded") {
-				throw error;
-			}
-			const delayMs = VALIDATION_RETRY_DELAYS_MS[attempt - 1];
-			const deadlineAllows =
-				options?.deadline === undefined ||
-				(delayMs !== undefined && Date.now() + delayMs < options.deadline);
-			if (
-				attempt >= VALIDATION_RETRY_MAX_ATTEMPTS ||
-				delayMs === undefined ||
-				!deadlineAllows ||
-				!isRetryableValidationFailure(error)
-			) {
-				throw error;
-			}
-			logValidationRetry(
-				attempt,
-				VALIDATION_RETRY_MAX_ATTEMPTS,
-				delayMs,
-				error,
-			);
-			await delay(delayMs, options?.signal);
-			// `delay` resolves (rather than rejects) on abort, so re-check here:
-			// without this an abort during backoff would fall through to another
-			// validate() call with an already-aborted signal.
-			if (options?.signal?.aborted) throw error;
-		}
-	}
-	// Unreachable: the loop always returns or throws before exhausting its
-	// bound, but TypeScript needs an explicit exit.
-	throw new Error(
-		"validateHevyApiKeyResilient: retry loop exited without a result",
+	const retryDelaysMs = resolveValidationRetryDelays(env);
+	const validationProgram = Effect.retry(
+		Effect.tryPromise({
+			try: () =>
+				validate(apiKey, hevyApiBaseUrl, createValidationClient, options),
+			catch: (error) => error,
+		}),
+		validationRetrySchedule(options, retryDelaysMs),
 	);
+	const cancellableProgram = options?.signal
+		? Effect.raceFirst(
+				validationProgram,
+				interruptOnAbortSignal(options.signal),
+			)
+		: validationProgram;
+	const result = await Effect.runPromise(
+		cancellableProgram.pipe(
+			Effect.catchCause((cause) => {
+				if (!Cause.hasInterrupts(cause)) return Effect.failCause(cause);
+				return Effect.fail(
+					options?.signal?.reason ??
+						new DOMException("Validation request canceled", "AbortError"),
+				);
+			}),
+		),
+	);
+	if (result === "valid") {
+		const write = cacheValidation(apiKey, env);
+		if (executionContext) executionContext.waitUntil(write);
+		else await write;
+	}
+	return result;
 }
