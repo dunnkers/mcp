@@ -13,7 +13,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![MCP Toplist](https://mcptoplist.com/badge/io.github.chrisdoc%2Fhevy-mcp.svg)](https://mcptoplist.com/server/io.github.chrisdoc%2Fhevy-mcp)
 
-[Connect to the hosted MCP](#connect-to-the-hosted-endpoint) · [Use the Hevy CLI](#hevy-cli) · [Watch the 18-second demo](https://raw.githubusercontent.com/chrisdoc/hevy-mcp/main/docs/assets/hevy-mcp-demo.mp4) · [Explore all 22 tools](#tools)
+[Connect to the hosted MCP](#connect-to-the-hosted-endpoint) · [Use the Hevy CLI](#hevy-cli) · [Watch the 18-second demo](https://raw.githubusercontent.com/chrisdoc/hevy-mcp/main/docs/assets/hevy-mcp-demo.mp4) · [Explore all 23 tools](#tools) · [Documentation](./docs/index.md)
 
 </div>
 
@@ -44,11 +44,10 @@ app. It lets AI assistants read, analyze, create, and update your Hevy workouts,
 routines, exercise templates, and body measurements through authenticated Hevy
 API requests.
 
-The repository is organized as a private workspace with explicit runtime
-boundaries: `@hevy-mcp/hevy-client` owns the web-safe Hevy client,
-`@hevy-mcp/core` owns MCP tools and server construction, `hevy-mcp` is the
-published Node.js stdio adapter, and `@hevy-mcp/worker` is the private
-Cloudflare HTTP/OAuth adapter. Only the Node workspace is publishable.
+The Node stdio/HTTP adapter and Cloudflare Worker share the same MCP tools.
+See [deployment modes](./docs/deployment-modes.md) to choose a transport, or
+[architecture](./docs/architecture.md) for workspace ownership, runtime scopes,
+and supported embedding APIs.
 
 > A Hevy API key, available with **Hevy PRO**, is required.
 
@@ -122,7 +121,7 @@ data handling details.
 
 ### 1. Get your Hevy API key
 
-Create an API key in [Hevy's API settings](https://www.hevyapp.com/api), then
+Create an API key in [Hevy's API settings](https://hevy.com/settings?developer), then
 keep it somewhere secure. API access currently requires a Hevy PRO subscription.
 
 ### 2. Connect `hevy-mcp` to your client
@@ -221,6 +220,12 @@ There are two ways to configure the Hevy MCP server for Google Antigravity (`agy
 ###### Option A: Automatic Plugin Installation (Recommended)
 
 This utilizes the built-in plugin system:
+
+The plugin reads the repository-root `mcp_config.json` to start the local
+stdio server. That configuration intentionally contains no API key; the server
+inherits `HEVY_API_KEY` from the host environment as described below. This is
+separate from the manual, user-global configuration described below and from
+the repository's `.mcp.json`, which configures hosted HTTP/OAuth.
 
 1. Install the plugin:
 
@@ -373,9 +378,11 @@ Local:   Your AI assistant  →  MCP over stdio   →  local hevy-mcp     →  H
 ```
 
 The hosted endpoint creates a fresh MCP server and Hevy client for each request.
-It validates the supplied key with Hevy, keeps no shared user session, and does
-not persist the key. The local server follows the same tool contract but runs on
-your machine and receives the key through its child-process environment.
+Direct bearer authentication uses the supplied Hevy key and caches successful
+validation for 15 minutes without persisting the raw key. OAuth instead stores
+the key encrypted in a grant. Neither path creates a shared MCP user session.
+The local server follows the same tool contract but receives the Hevy key
+through its process environment.
 
 In either mode, read tools retrieve data; mutation tools create or replace data
 only when your assistant calls them.
@@ -389,14 +396,9 @@ These server-provided MCP prompts coordinate common multi-step workflows:
 | `analyze-workout-progress`    | Optional `weeks` from 1-12; default `4`    | Calls `get-training-summary`, then analyzes workout activity and body-measurement trends from the returned evidence.   |
 | `create-workout-from-routine` | Required `routine_id` and UTC `start_time` | Loads a routine, collects actual completed-set data and an end time, then creates a workout without inventing results. |
 
-> [!NOTE]
-> With MCP SDK v1.29.0, clients invoking `analyze-workout-progress` with its
-> default value must send `arguments: {}`. Omitting the entire `arguments`
-> object is rejected by that SDK version before the default is applied.
-
 ## Tools
 
-`hevy-mcp` registers 22 tools. Read-only tools are safe for exploration; create
+`hevy-mcp` registers 23 tools. Read-only tools are safe for exploration; create
 and update tools are exposed with MCP mutation annotations so compatible clients
 can request confirmation.
 
@@ -427,8 +429,9 @@ can request confirmation.
 | Body measurements | `get-body-measurement` | Get the body measurement entry for one date. |
 | Body measurements | `create-body-measurement` | Create a dated body measurement. |
 | Body measurements | `update-body-measurement` | Update the body measurement for an existing date. |
+| Diagnostics | `feedback` | Report a concise, privacy-safe description of an issue or unexpected behavior. |
 
-`create-routine` requires a top-level `routine` envelope with a required `exercises` array; fields use snake_case at every level:
+`create-routine` and `update-routine` require a top-level `routine` envelope with a non-empty `exercises` array; each exercise must contain at least one set, and fields use snake_case at every level:
 
 ```json
 {
@@ -479,7 +482,7 @@ https://mcp.hevy-mcp.dev/mcp
 ```
 
 It is the quickest way to use `hevy-mcp`: there is nothing to install or keep
-running locally, and it exposes the same 22 tools as the npm package and Docker
+running locally, and it exposes the same 23 tools as the npm package and Docker
 image.
 
 The Cloudflare Worker uses stateless **Streamable HTTP** at `POST /mcp`.
@@ -498,8 +501,9 @@ Clients must send their Hevy API key as a fixed authorization header:
 }
 ```
 
-The bearer value is your Hevy API key, not an OAuth token. The Worker validates
-the key with Hevy on each request, does not store it, and forwards it upstream
+In this configuration the bearer value is your Hevy API key, not an OAuth
+token. The Worker caches successful validation for 15 minutes under a hashed
+key, does not persist the raw key on this direct path, and forwards it upstream
 only as Hevy's required `api-key` header.
 
 ### OAuth for Claude.ai and other remote MCP clients
@@ -518,8 +522,9 @@ following the `OAUTH_KV` setup in [CONTRIBUTING.md](./CONTRIBUTING.md):
 Add the Worker URL ending in `/mcp` as a Claude.ai custom connector and
 complete the authorization flow in the browser. Direct
 `Authorization: Bearer <hevy-api-key>` requests keep working unchanged — the
-OAuth layer is purely additive — and rotating your Hevy API key invalidates
-every OAuth grant created with it.
+OAuth layer is purely additive. Revoking or rotating your Hevy key prevents
+subsequent Hevy API access with that key; it does not itself delete stored
+grants or immediately clear cached validation.
 
 OAuth access tokens last seven days and refresh tokens last 30 days. This
 reduces KV writes from frequent hourly refreshes while preserving automatic
@@ -532,8 +537,8 @@ the fixed custom header above.
 
 ### Self-host the Worker
 
-A clean clone can deploy the portable TypeScript Wrangler configuration with
-`npx wrangler deploy --x-new-config` and receive a `workers.dev` URL. OAuth
+A clean clone can deploy the portable TypeScript Cloudflare configuration with
+`pnpm --dir packages/worker exec cf deploy` and receive a `workers.dev` URL. OAuth
 requires your own `OAUTH_KV` namespace; custom domains, routes, and
 observability destinations are optional account-owned settings. See
 [CONTRIBUTING.md](./CONTRIBUTING.md#cloudflare-worker-development) for setup and
@@ -545,23 +550,24 @@ self-hosted Streamable HTTP.
 
 ## Advanced configuration
 
-| Setting                          | Default                          | Scope                         | Notes                                                                                                          |
-| -------------------------------- | -------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `HEVY_API_KEY`                   | None; required                   | Local stdio or HTTP           | Hevy API key from the Hevy app. Never pass it in a URL.                                                        |
-| `HEVY_MCP_API_TIMEOUT`           | `60000` ms                       | Local stdio                   | Positive Hevy API timeout in milliseconds. Invalid values fall back to 60 seconds.                             |
-| `HEVY_MCP_DEBUG`                 | Disabled                         | Local Node                    | Set to exactly `1` for privacy-bounded diagnostics on stderr. Stdout remains reserved for MCP JSON-RPC.        |
-| `HEVY_MCP_HTTP_BEARER_TOKEN`     | None                             | Non-loopback HTTP             | Required when `--host` is not loopback; use a separate token, never the Hevy API key.                          |
-| `HEVY_MCP_HTTP_MAX_SESSIONS`     | `100`                            | Local HTTP                    | Maximum established sessions, including sessions currently initializing; excess requests receive `429`.        |
-| `HEVY_MCP_HTTP_MAX_INITIALIZING` | `10`                             | Local HTTP                    | Maximum concurrent session initializations; excess requests receive `503` and are not queued.                  |
-| `HEVY_MCP_HTTP_IDLE_TIMEOUT_MS`  | `1800000` ms                     | Local HTTP                    | Idle sessions are evicted after 30 minutes; each session request resets the timer.                             |
-| `HEVY_MCP_HTTP_BODY_TIMEOUT_MS`  | `30000` ms                       | Local HTTP                    | Stalled request bodies receive `408`; values are bounded to five minutes.                                      |
-| `HEVY_MCP_TELEMETRY`             | Enabled                          | Local Node                    | Set to exactly `0` before startup/import to disable Sentry and OTLP traces/metrics.                            |
-| `HEVY_MCP_TELEMETRY_DIAGNOSTICS` | Enabled                          | Local Node                    | Set to exactly `0` to keep structural telemetry while suppressing exception messages and stacks.               |
-| `XDG_CACHE_HOME`                 | `~/.cache`                       | Local stdio                   | Changes the root for the npm update-check cache at `hevy-mcp/update-check.json`.                               |
-| `SENTRY_DSN`                     | Packaged Sentry SaaS project DSN | Optional local Node telemetry | Sentry project DSN override. An empty value disables Sentry export. The Worker does not import Node telemetry. |
-| `SENTRY_RELEASE`                 | `hevy-mcp@<installed-version>`   | Optional local Node telemetry | Overrides the release label attached to local Sentry error events.                                             |
-| `-h`, `--help`                   | N/A                              | Local stdio CLI               | Print supported options and exit.                                                                              |
-| `-v`, `--version`                | N/A                              | Local stdio CLI               | Print the installed version and exit.                                                                          |
+| Setting                          | Default                                    | Scope                         | Notes                                                                                                          |
+| -------------------------------- | ------------------------------------------ | ----------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `HEVY_API_KEY`                   | None; required                             | Local stdio or HTTP           | Hevy API key from the Hevy app. Never pass it in a URL.                                                        |
+| `HEVY_MCP_API_TIMEOUT`           | `60000` ms                                 | Local stdio                   | Positive Hevy API timeout in milliseconds. Invalid values fall back to 60 seconds.                             |
+| `HEVY_MCP_DEBUG`                 | Disabled                                   | Local Node                    | Set to exactly `1` for privacy-bounded diagnostics on stderr. Stdout remains reserved for MCP JSON-RPC.        |
+| `HEVY_MCP_HTTP_BEARER_TOKEN`     | None                                       | Non-loopback HTTP             | Required when `--host` is not loopback; use a separate token, never the Hevy API key.                          |
+| `HEVY_MCP_HTTP_MAX_SESSIONS`     | `100`                                      | Local HTTP                    | Maximum established sessions, including sessions currently initializing; excess requests receive `429`.        |
+| `HEVY_MCP_HTTP_MAX_INITIALIZING` | `10`                                       | Local HTTP                    | Maximum concurrent session initializations; excess requests receive `503` and are not queued.                  |
+| `HEVY_MCP_HTTP_IDLE_TIMEOUT_MS`  | `1800000` ms                               | Local HTTP                    | Idle sessions are evicted after 30 minutes; each session request resets the timer.                             |
+| `HEVY_MCP_HTTP_BODY_TIMEOUT_MS`  | `30000` ms                                 | Local HTTP                    | Stalled request bodies receive `408`; values are bounded to five minutes.                                      |
+| `HEVY_MCP_TELEMETRY`             | Built: on; source: off                     | Local Node                    | Set `0` to disable telemetry or `1` to opt in for source runs. Imports remain side-effect-free.                |
+| `HEVY_MCP_TELEMETRY_DIAGNOSTICS` | Enabled                                    | Local Node                    | Set to exactly `0` to keep structural telemetry while suppressing exception messages and stacks.               |
+| `XDG_CACHE_HOME`                 | `~/.cache`                                 | Local stdio                   | Changes the root for the npm update-check cache at `hevy-mcp/update-check.json`.                               |
+| `SENTRY_DSN`                     | Packaged Sentry SaaS project DSN           | Optional local Node telemetry | Sentry project DSN override. An empty value disables Sentry export. The Worker does not import Node telemetry. |
+| `SENTRY_RELEASE`                 | `hevy-mcp@<installed-version>`             | Optional local Node telemetry | Overrides the release label attached to local Sentry error events.                                             |
+| `SENTRY_ENVIRONMENT`             | Built: `production`; source: `development` | Optional local Node telemetry | Overrides the environment label for enabled Sentry error events.                                               |
+| `-h`, `--help`                   | N/A                                        | Local stdio CLI               | Print supported options and exit.                                                                              |
+| `-v`, `--version`                | N/A                                        | Local stdio CLI               | Print the installed version and exit.                                                                          |
 
 The local Node executable uses stdio by default. Opt into local Streamable
 HTTP with:
@@ -591,21 +597,27 @@ server-scoped in-memory catalog cache:
 - Entries live for five minutes, and the cache holds at most one catalog.
 - Concurrent catalog requests share an in-flight fetch when possible.
 - `search-exercise-templates` accepts `refresh: true` to invalidate the cache.
-
-- Each hosted Worker request gets a fresh cache, preventing cross-key sharing.
+- Each hosted Worker request gets a fresh catalog cache, preventing cross-key sharing.
+- Each local HTTP session owns its own MCP server and catalog cache; caches are
+  not shared across sessions.
 
 ### Local Node telemetry and privacy
 
-The local Node package enables project telemetry by default. It is local Node
-behavior only; the Cloudflare Worker does not import Node telemetry. Set
-`HEVY_MCP_TELEMETRY=0` before startup or import to disable all project
-telemetry. Only the literal value `0` opts out: an unset value, an empty value,
-`1`, `false`, and every other value remain enabled. The master setting takes
-precedence over `SENTRY_DSN` and packaged or runtime `OTEL_COLLECTOR_TOKEN`
-credentials, so the disabled path creates no telemetry exporters or periodic
-metric readers and makes no telemetry network requests. `SENTRY_DSN` remains a
-Sentry-only setting; when telemetry is enabled, an empty value disables only
-Sentry export.
+Published Node builds enable project telemetry by default. Unbuilt source runs
+(such as development and probe scripts) disable it unless
+`HEVY_MCP_TELEMETRY=1` is set explicitly. This is local Node behavior only; the
+Cloudflare Worker does not import Node telemetry. Set `HEVY_MCP_TELEMETRY=0`
+before launching Node to disable all project telemetry in either mode. In
+published builds, every value except the literal `0` retains the enabled default.
+The scoped Node lifecycle Layer acquires telemetry; importing the package remains
+side-effect-free. Enabled source runs use the Sentry environment `development`;
+published builds use `production`. Set `SENTRY_ENVIRONMENT` to override this
+label, for example to `qa` or `staging`. The master setting takes precedence over
+`SENTRY_DSN` and packaged or
+runtime `OTEL_COLLECTOR_TOKEN` credentials, so the disabled path creates no
+telemetry exporters or periodic metric readers and makes no telemetry network
+requests. `SENTRY_DSN` remains a Sentry-only setting; when telemetry is enabled,
+an empty value disables only Sentry export.
 
 When enabled, actionable errors are sent to the Sentry project configured by
 `SENTRY_DSN`; Sentry performance tracing is disabled. Exception messages and
@@ -614,14 +626,17 @@ stacks are bounded and scrubbed before export. Set
 suppressing those details. Traces and metrics continue to be sent to the
 collector at
 <https://otel.chrisdoc.dev/v1/traces> and
-<https://otel.chrisdoc.dev/v1/metrics>, which forward to Honeycomb. Metrics
-export every 30 seconds.
+<https://otel.chrisdoc.dev/v1/metrics>. The project uses its own OpenTelemetry
+Collector; downstream destinations are configured in that infrastructure.
+Metrics export every 30 seconds. See [observability documentation](./docs/observability.md)
+for Cloudflare OTLP export and domain tracing.
 
-The API key is never exported and is not used to derive a user identity. A
-per-failure diagnostic ID and OTel trace ID may be attached to actionable
-errors for support correlation. Structured telemetry contains only bounded
-service, release, transport, tool, outcome, error, count, retry, duration,
-session, cache, workflow, API method, normalized endpoint, and status fields.
+The raw API key is never exported. Ordinary tool telemetry can include a short,
+deterministic HMAC pseudonym derived from the key for correlation; `feedback`
+uses a separate unobserved path. A per-failure diagnostic ID and OTel trace ID
+may be attached to actionable errors. See
+[telemetry data dictionary](./docs/telemetry-data-dictionary.md) for the bounded
+telemetry fields and privacy contract.
 
 Exception messages and stacks are treated as diagnostic details: they are
 length-limited, scrubbed for credentials, URLs, and local home paths, and
@@ -635,18 +650,23 @@ metadata, and unnormalized endpoint paths remain prohibited.
 
 - Keep `HEVY_API_KEY` out of source control, URLs, logs, and screenshots.
 - Local clients provide the key through the child process environment.
-- Hosted clients send the key only in the `Authorization: Bearer` header. The
-  Worker validates each key with Hevy, does not store it, and sends it upstream
-  only as Hevy's `api-key` header.
-- Browser requests must come from an exact allowlisted origin. The default
-  allowlist includes Claude.ai, ChatGPT, VS Code for the Web, and github.dev;
-  self-hosted deployments can override it with `MCP_ALLOWED_ORIGINS`.
+- Direct hosted clients send the Hevy key only in the `Authorization: Bearer`
+  header; successful validation is cached, but the raw key is not persisted.
+  OAuth grants store the key encrypted. Both paths send it to Hevy only as the
+  `api-key` header.
+- Browser MCP requests must be same-origin or match an exact allowlisted
+  origin. The default allowlist includes Claude.ai, ChatGPT, VS Code for the
+  Web, and github.dev; self-hosted deployments can override it with
+  `MCP_ALLOWED_ORIGINS`. See [deployment modes](./docs/deployment-modes.md#origins-and-self-hosting)
+  for the OAuth authorization-form exception.
 - Local development can copy `.dev.vars.example` to `.dev.vars` to disable
   Origin validation for MCP Inspector. PR preview Workers use the same
   development-only setting because their browser origins are dynamic. Never
   set `MCP_DISABLE_ORIGIN_CHECK=true` on a production Worker.
-- Create operations can produce duplicates when retried. Update operations
-  replace existing records. Review tool inputs and use client confirmations.
+- Create operations can produce duplicates when retried. Routine updates
+  replace content; workout metadata updates preserve omitted fields and
+  exercises, while `replace-workout-exercises` replaces all exercises and sets.
+  Review tool inputs and use client confirmations.
 
 ## Troubleshooting
 
@@ -658,7 +678,7 @@ metadata, and unnormalized endpoint paths remain prohibited.
   session after confirming the `hevy` entry exists.
 - **Hevy API returns 401:** the key is invalid, expired, revoked, or
   misconfigured. Verify or create an active key at
-  [Hevy's API settings](https://www.hevyapp.com/api), then restart the client.
+  [Hevy's API settings](https://hevy.com/settings?developer), then restart the client.
 - **Hosted authentication fails:** confirm the key belongs to a Hevy PRO
   account and is sent as `Authorization: Bearer <HEVY_API_KEY>`.
 - **Local authentication fails:** confirm the key is active and available to the
@@ -673,6 +693,15 @@ If you find a bug or have a feature request, [open an issue](https://github.com/
 Contributions are welcome. Developer setup, testing lanes, generated-client
 workflows, Cloudflare Worker deployment, and pull request rules are documented
 in [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+Use mise for the pinned Node.js and pnpm versions, then run the deterministic
+unit lane. It does not need a live Hevy API key:
+
+```bash
+MISE_AUTO_INSTALL=false mise install
+MISE_AUTO_INSTALL=false mise exec -- pnpm install
+MISE_AUTO_INSTALL=false mise exec -- pnpm run test:unit
+```
 
 ## License and acknowledgements
 

@@ -3,42 +3,28 @@
  * Do not edit manually.
  */
 
-import fetch from "../../../fetch.ts";
+import type { Options, Unwrappable, RequestResult } from "../../.kubb/client";
 import type {
-  Client,
-  RequestConfig,
-  ResponseErrorConfig,
-} from "../../../fetch.ts";
-import type {
-  GetV1UserInfoQueryResponse,
-  GetV1UserInfoHeaderParams,
-  GetV1UserInfo404,
-} from "../types/GetV1UserInfo.ts";
-
-function getGetV1UserInfoUrl() {
-  const res = { method: "GET", url: `/v1/user/info` as const };
-  return res;
-}
+  GetV1UserInfoOptions,
+  GetV1UserInfoResponses,
+} from "../types/GetV1UserInfo";
+import { client, withUnwrap } from "../../.kubb/client";
 
 /**
  * @summary Get user info
  * {@link /v1/user/info}
  */
-export async function getV1UserInfo(
-  headers: GetV1UserInfoHeaderParams,
-  config: Partial<RequestConfig> & { client?: Client } = {},
-) {
-  const { client: request = fetch, ...requestConfig } = config;
+export function getV1UserInfo<ThrowOnError extends boolean = true>(
+  options: Options<GetV1UserInfoOptions, ThrowOnError>,
+): Unwrappable<RequestResult<GetV1UserInfoResponses, ThrowOnError>> {
+  const { client: request = client, ...config } = options;
 
-  const res = await request<
-    GetV1UserInfoQueryResponse,
-    ResponseErrorConfig<GetV1UserInfo404>,
-    unknown
-  >({
-    method: "GET",
-    url: getGetV1UserInfoUrl().url.toString(),
-    ...requestConfig,
-    headers: { ...headers, ...requestConfig.headers },
-  });
-  return res.data;
+  return withUnwrap(
+    request({
+      method: "GET",
+      url: "/v1/user/info",
+      ...config,
+      throwOnError: config.throwOnError ?? true,
+    }) as Promise<RequestResult<GetV1UserInfoResponses, ThrowOnError>>,
+  );
 }

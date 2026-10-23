@@ -1,18 +1,21 @@
 import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
+import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
-import { getCompactJsonSchemaConversionCount } from "../utils/compact-json-schema.js";
+import { getCompactJsonSchemaConversionCount } from "../protocol/compact-json-schema.js";
 import type { ExerciseTemplateCatalog } from "../utils/exercise-template-catalog.js";
 import { createToolRuntime } from "./tool-runtime.js";
 import {
-	hevyToolDefinitions,
 	preloadHevyToolSchemas,
 	registerHevyTools,
+	registeredToolDefinitions,
 } from "./register.js";
 
 const catalog: ExerciseTemplateCatalog = {
+	effect: () => Effect.succeed([]),
 	get: () => Promise.resolve([]),
-	reset: () => {},
+	reset: () => Effect.void,
+	close: () => Effect.void,
 };
 
 /**
@@ -54,7 +57,7 @@ describe("preloadHevyToolSchemas", () => {
 		]);
 		try {
 			const { tools } = await protocolClient.listTools();
-			expect(tools).toHaveLength(hevyToolDefinitions.length);
+			expect(tools).toHaveLength(registeredToolDefinitions.length);
 			expect(getCompactJsonSchemaConversionCount()).toBe(afterFirstPreload);
 		} finally {
 			await Promise.all([protocolClient.close(), server.close()]);

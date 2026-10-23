@@ -1,6 +1,6 @@
 {
 	"name": "@hevy-mcp/hevy-client",
-	"version": "0.2.5",
+	"version": "0.2.15",
 	"private": true,
 	"type": "module",
 	"exports": {
@@ -15,6 +15,10 @@
 		"./schemas": {
 			"types": "./src/schemas.ts",
 			"import": "./src/schemas.ts"
+		},
+		"./internal": {
+			"types": "./src/internal.ts",
+			"import": "./src/internal.ts"
 		}
 	},
 	"scripts": {
@@ -22,7 +26,7 @@
 		"check:types": "tsc --noEmit -p tsconfig.json"
 	},
 	"dependencies": {
-		"effect": "^4.0.0-rc.112",
-		"zod": "^4.4.3"
+		"effect": "^4.0.5",
+		"zod": "^4.6.7"
 	}
 }

@@ -1,115 +1,138 @@
+import { Cache, Effect } from "effect";
+import { TestClock } from "effect/testing";
 import { describe, expect, it, vi } from "vitest";
-import { createHevyClient, type HevyClient } from "@hevy-mcp/hevy-client";
-import { createExerciseTemplateCatalog } from "./exercise-template-catalog.js";
+import type { HevyExecutionOptions } from "@hevy-mcp/hevy-client";
+import type {
+	TemplatesListAllOperation,
+	TemplatesListAllResult,
+} from "@hevy-mcp/operations";
+import { PaginationMismatchError } from "@hevy-mcp/operations";
+import {
+	createExerciseTemplateCatalog,
+	type ExerciseTemplateCatalog,
+	type ExerciseTemplateCatalogCache,
+	EXERCISE_TEMPLATE_CATALOG_CACHE_MAX_SIZE,
+	EXERCISE_TEMPLATE_CATALOG_CACHE_TTL_MS,
+} from "./exercise-template-catalog.js";
+
+type ListAll = Pick<TemplatesListAllOperation, "effect">;
+type ListAllError = Effect.Error<ReturnType<ListAll["effect"]>>;
+
+function createCatalog(
+	listAll: ListAll,
+	cache?: ExerciseTemplateCatalogCache,
+): ExerciseTemplateCatalog {
+	const serverCache =
+		cache ??
+		Effect.runSync(
+			Cache.make({
+				capacity: EXERCISE_TEMPLATE_CATALOG_CACHE_MAX_SIZE,
+				timeToLive: EXERCISE_TEMPLATE_CATALOG_CACHE_TTL_MS,
+				lookup: (_key: string) => listAll.effect(),
+			}),
+		);
+	return createExerciseTemplateCatalog({ templates: { listAll } }, serverCache);
+}
+
+function operation(effect: ListAll["effect"]): ListAll {
+	return { effect };
+}
 
 describe("exercise template catalog", () => {
-	it("reset clears the lifecycle cache and forces a fresh catalog request", async () => {
-		const fetchMock = vi
-			.fn()
-			.mockResolvedValueOnce(
-				new Response(
-					JSON.stringify({
-						page: 1,
-						page_count: 1,
-						exercise_templates: [{ id: "first", title: "First" }],
-					}),
-					{ headers: { "content-type": "application/json" } },
-				),
+	it("reset clears the server cache and forces a fresh catalog request", async () => {
+		const listAll = vi
+			.fn<ListAll["effect"]>()
+			.mockReturnValueOnce(
+				Effect.succeed({ items: [{ id: "first" }], pageCount: 1 }),
 			)
-			.mockResolvedValueOnce(
-				new Response(
-					JSON.stringify({
-						page: 1,
-						page_count: 1,
-						exercise_templates: [{ id: "second", title: "Second" }],
-					}),
-					{ headers: { "content-type": "application/json" } },
-				),
+			.mockReturnValueOnce(
+				Effect.succeed({ items: [{ id: "second" }], pageCount: 1 }),
 			);
-		const client = createHevyClient({ apiKey: "key", fetch: fetchMock });
-		const catalog = createExerciseTemplateCatalog(client);
+		const catalog = createCatalog(operation(listAll));
 
 		await expect(catalog.get()).resolves.toMatchObject([{ id: "first" }]);
 		await expect(catalog.get()).resolves.toMatchObject([{ id: "first" }]);
-		catalog.reset();
+		await Effect.runPromise(catalog.reset());
 		await expect(catalog.get()).resolves.toMatchObject([{ id: "second" }]);
-		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(listAll).toHaveBeenCalledTimes(2);
 	});
+
 	it("deduplicates concurrent cache misses", async () => {
-		let resolveResponse!: (response: Response) => void;
-		const pendingResponse = new Promise<Response>((resolve) => {
-			resolveResponse = resolve;
-		});
-		const fetchMock = vi.fn().mockReturnValue(pendingResponse);
-		const client = createHevyClient({ apiKey: "key", fetch: fetchMock });
-		const catalog = createExerciseTemplateCatalog(client);
-
-		const first = catalog.get();
-		const second = catalog.get();
-		expect(fetchMock).toHaveBeenCalledOnce();
-		resolveResponse(
-			new Response(
-				JSON.stringify({
-					page: 1,
-					page_count: 1,
-					exercise_templates: [{ id: "shared", title: "Shared" }],
-				}),
-				{ headers: { "content-type": "application/json" } },
-			),
+		let resolveLookup: ((result: TemplatesListAllResult) => void) | undefined;
+		const listAll = vi.fn<ListAll["effect"]>().mockImplementation(() =>
+			Effect.callback<TemplatesListAllResult, ListAllError>((resume) => {
+				resolveLookup = (result) => resume(Effect.succeed(result));
+			}),
 		);
+		const catalog = createCatalog(operation(listAll));
 
+		const first = Effect.runPromise(catalog.effect());
+		const second = Effect.runPromise(catalog.effect());
+		await vi.waitFor(() => expect(listAll).toHaveBeenCalledOnce());
+		expect(listAll).toHaveBeenCalledOnce();
+
+		resolveLookup?.({
+			items: [{ id: "shared", title: "Shared" }],
+			pageCount: 1,
+		});
 		await expect(Promise.all([first, second])).resolves.toEqual([
 			[{ id: "shared", title: "Shared" }],
 			[{ id: "shared", title: "Shared" }],
 		]);
 	});
 
-	it("does not share a controlled refresh between independently cancellable callers", async () => {
+	it("cancels the shared load when its only waiter aborts", async () => {
+		const controller = new AbortController();
+		let cancelled = false;
+		const listAll = vi.fn<ListAll["effect"]>().mockImplementation(() =>
+			Effect.callback<TemplatesListAllResult, ListAllError>(() => {
+				return Effect.sync(() => {
+					cancelled = true;
+				});
+			}),
+		);
+		const catalog = createCatalog(operation(listAll));
+		const pending = catalog.get({ execution: { signal: controller.signal } });
+		await vi.waitFor(() => expect(listAll).toHaveBeenCalledOnce());
+		controller.abort(new DOMException("cancelled", "AbortError"));
+		await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+		await vi.waitFor(() => expect(cancelled).toBe(true));
+		expect(listAll).toHaveBeenCalledOnce();
+	});
+
+	it("keeps the shared load when one controlled waiter aborts", async () => {
 		const firstController = new AbortController();
 		const secondController = new AbortController();
-		type ExerciseTemplatesResponse = Awaited<
-			ReturnType<HevyClient["getExerciseTemplates"]>
-		>;
-		const responses: Array<Promise<ExerciseTemplatesResponse>> = [
-			new Promise<ExerciseTemplatesResponse>((resolve, reject) => {
-				firstController.signal.addEventListener(
-					"abort",
-					() => reject(firstController.signal.reason),
-					{ once: true },
-				);
-				setTimeout(
-					() =>
-						resolve({
-							page: 1,
-							page_count: 1,
-							exercise_templates: [{ id: "first", title: "First" }],
-						}),
-					100,
-				);
-			}),
-			new Promise<ExerciseTemplatesResponse>((resolve) =>
-				setTimeout(
-					() =>
-						resolve({
-							page: 1,
-							page_count: 1,
-							exercise_templates: [{ id: "second", title: "Second" }],
-						}),
-					20,
-				),
-			),
-		];
-		const getExerciseTemplates = vi.fn<HevyClient["getExerciseTemplates"]>(
-			(_params, _options) => {
-				const response = responses.shift();
-				if (!response) throw new Error("Unexpected extra page");
-				return response;
-			},
-		);
-		const client = {
-			getExerciseTemplates,
-		} satisfies Pick<HevyClient, "getExerciseTemplates">;
-		const catalog = createExerciseTemplateCatalog(client);
+		const listAll = vi
+			.fn<ListAll["effect"]>()
+			.mockImplementation((options?: HevyExecutionOptions) =>
+				Effect.callback<TemplatesListAllResult, ListAllError>((resume) => {
+					const signal = options?.signal;
+					if (signal?.aborted) {
+						resume(Effect.fail(signal.reason));
+						return;
+					}
+					const onAbort = () =>
+						resume(Effect.fail(signal?.reason ?? new Error("aborted")));
+					signal?.addEventListener("abort", onAbort, { once: true });
+					const template = "shared";
+					const timer = setTimeout(
+						() =>
+							resume(
+								Effect.succeed({
+									items: [{ id: template }],
+									pageCount: 1,
+								}),
+							),
+						20,
+					);
+					return Effect.sync(() => {
+						clearTimeout(timer);
+						signal?.removeEventListener("abort", onAbort);
+					});
+				}),
+			);
+		const catalog = createCatalog(operation(listAll));
 
 		const first = catalog.get({
 			execution: { signal: firstController.signal },
@@ -120,20 +143,167 @@ describe("exercise template catalog", () => {
 		firstController.abort(new DOMException("first canceled", "AbortError"));
 
 		await expect(first).rejects.toMatchObject({ name: "AbortError" });
-		await expect(second).resolves.toMatchObject([{ id: "second" }]);
-		expect(getExerciseTemplates).toHaveBeenCalledTimes(2);
+		await expect(second).resolves.toMatchObject([{ id: "shared" }]);
+		expect(listAll).toHaveBeenCalledTimes(1);
 	});
 
-	it("returns an empty catalog when a page omits its template array", async () => {
-		const fetchMock = vi.fn().mockResolvedValue(
-			new Response(JSON.stringify({ page: 1, page_count: 1 }), {
-				headers: { "content-type": "application/json" },
+	it("preserves the fetched pageCount through the cache", async () => {
+		const finished: Array<{
+			pageCountBucket?: string;
+			itemCountBucket?: string;
+		}> = [];
+		const listAll = vi
+			.fn<ListAll["effect"]>()
+			.mockReturnValue(
+				Effect.succeed({ items: [{ id: "only" }], pageCount: 2 }),
+			);
+		const serverCache = Effect.runSync(
+			Cache.make({
+				capacity: EXERCISE_TEMPLATE_CATALOG_CACHE_MAX_SIZE,
+				timeToLive: EXERCISE_TEMPLATE_CATALOG_CACHE_TTL_MS,
+				lookup: (_key: string) => listAll(),
 			}),
 		);
-		const client = createHevyClient({ apiKey: "key", fetch: fetchMock });
-		const catalog = createExerciseTemplateCatalog(client);
+		const catalog = createExerciseTemplateCatalog(
+			{ templates: { listAll: operation(listAll) } },
+			serverCache,
+			{
+				start: () => ({
+					finish: (metadata) => {
+						finished.push({ ...metadata });
+					},
+				}),
+			},
+		);
 
-		await expect(catalog.get()).resolves.toEqual([]);
-		expect(fetchMock).toHaveBeenCalledOnce();
+		await expect(catalog.get()).resolves.toMatchObject([{ id: "only" }]);
+		expect(listAll).toHaveBeenCalledOnce();
+		// One item fetched across two pages (empty terminal page) must not be
+		// recomputed from the item count.
+		expect(finished[0]?.pageCountBucket).toBe("2-10");
+		expect(finished[0]?.itemCountBucket).toBe("1");
+	});
+
+	it("uses templates.listAll rather than a Promise client for lookup", async () => {
+		const listAll = vi.fn<ListAll["effect"]>().mockReturnValue(
+			Effect.succeed({
+				items: [{ id: "template-1", title: "Template 1" }],
+				pageCount: 1,
+			}),
+		);
+		const catalog = createCatalog(operation(listAll));
+
+		await expect(catalog.get()).resolves.toEqual([
+			{ id: "template-1", title: "Template 1" },
+		]);
+		expect(listAll).toHaveBeenCalledOnce();
+	});
+
+	it("reloads after the five-minute TTL", async () => {
+		let calls = 0;
+		const listAll = vi.fn<ListAll["effect"]>().mockImplementation(() =>
+			Effect.succeed({
+				items: [{ id: `template-${++calls}` }],
+				pageCount: 1,
+			}),
+		);
+		const catalog = createCatalog(operation(listAll));
+		const program = Effect.gen(function* () {
+			const first = yield* catalog.effect();
+			yield* TestClock.adjust(
+				`${EXERCISE_TEMPLATE_CATALOG_CACHE_TTL_MS} millis`,
+			);
+			const second = yield* catalog.effect();
+			return [first, second] as const;
+		});
+
+		await expect(
+			Effect.runPromise(Effect.provide(program, TestClock.layer())),
+		).resolves.toEqual([[{ id: "template-1" }], [{ id: "template-2" }]]);
+		expect(listAll).toHaveBeenCalledTimes(2);
+	});
+
+	it("invalidates a failed lookup before the next call", async () => {
+		const listAll = vi
+			.fn<ListAll["effect"]>()
+			.mockReturnValueOnce(
+				Effect.fail(
+					new PaginationMismatchError({
+						requested: 1,
+						received: -1,
+						collection: "exerciseTemplates",
+						message: "temporary failure",
+					}),
+				),
+			)
+			.mockReturnValueOnce(
+				Effect.succeed({ items: [{ id: "recovered" }], pageCount: 1 }),
+			);
+		const catalog = createCatalog(operation(listAll));
+
+		await expect(catalog.get()).rejects.toThrow("temporary failure");
+		await expect(catalog.get()).resolves.toMatchObject([{ id: "recovered" }]);
+		expect(listAll).toHaveBeenCalledTimes(2);
+	});
+
+	it("shares one load between controlled callers", async () => {
+		const pending: Array<{
+			signal: AbortSignal | undefined;
+			resume: (effect: Effect.Effect<TemplatesListAllResult>) => void;
+		}> = [];
+		const listAll = vi
+			.fn<ListAll["effect"]>()
+			.mockImplementation((options?: HevyExecutionOptions) =>
+				Effect.callback<TemplatesListAllResult, ListAllError>((resume) => {
+					pending.push({ resume, signal: options?.signal });
+				}),
+			);
+		const catalog = createCatalog(operation(listAll));
+
+		const first = catalog.get();
+		const second = catalog.get({ execution: {} });
+		await vi.waitFor(() => expect(pending).toHaveLength(1));
+
+		pending[0]?.resume(
+			Effect.succeed({ items: [{ id: "shared" }], pageCount: 1 }),
+		);
+		await expect(first).resolves.toMatchObject([{ id: "shared" }]);
+		await expect(second).resolves.toMatchObject([{ id: "shared" }]);
+		expect(pending[0]?.signal).toBeUndefined();
+		expect(listAll).toHaveBeenCalledTimes(1);
+	});
+
+	it("fails a past execution deadline as a typed timeout", async () => {
+		const listAll = vi
+			.fn<ListAll["effect"]>()
+			.mockReturnValue(
+				Effect.succeed({ items: [{ id: "unused" }], pageCount: 0 }),
+			);
+		const catalog = createCatalog(operation(listAll));
+
+		await expect(
+			catalog.get({ execution: { deadline: Date.now() - 1 } }),
+		).rejects.toMatchObject({
+			name: "TimeoutError",
+		});
+		expect(listAll).not.toHaveBeenCalled();
+	});
+
+	it("fails an aborted execution as a typed cancellation", async () => {
+		const controller = new AbortController();
+		controller.abort(new DOMException("cancelled", "AbortError"));
+		const listAll = vi
+			.fn<ListAll["effect"]>()
+			.mockReturnValue(
+				Effect.succeed({ items: [{ id: "unused" }], pageCount: 0 }),
+			);
+		const catalog = createCatalog(operation(listAll));
+
+		await expect(
+			catalog.get({ execution: { signal: controller.signal } }),
+		).rejects.toMatchObject({
+			name: "AbortError",
+		});
+		expect(listAll).not.toHaveBeenCalled();
 	});
 });

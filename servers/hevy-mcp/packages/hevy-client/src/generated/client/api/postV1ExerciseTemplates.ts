@@ -3,52 +3,30 @@
  * Do not edit manually.
  */
 
-import fetch from "../../../fetch.ts";
+import type { Options, Unwrappable, RequestResult } from "../../.kubb/client";
 import type {
-  Client,
-  RequestConfig,
-  ResponseErrorConfig,
-} from "../../../fetch.ts";
-import type {
-  PostV1ExerciseTemplatesMutationRequest,
-  PostV1ExerciseTemplatesMutationResponse,
-  PostV1ExerciseTemplatesHeaderParams,
-  PostV1ExerciseTemplates400,
-  PostV1ExerciseTemplates403,
-} from "../types/PostV1ExerciseTemplates.ts";
-
-function getPostV1ExerciseTemplatesUrl() {
-  const res = { method: "POST", url: `/v1/exercise_templates` as const };
-  return res;
-}
+  PostV1ExerciseTemplatesOptions,
+  PostV1ExerciseTemplatesResponses,
+} from "../types/PostV1ExerciseTemplates";
+import { client, withUnwrap } from "../../.kubb/client";
 
 /**
  * @summary Create a new custom exercise template.
  * {@link /v1/exercise_templates}
  */
-export async function postV1ExerciseTemplates(
-  data: PostV1ExerciseTemplatesMutationRequest,
-  headers: PostV1ExerciseTemplatesHeaderParams,
-  config: Partial<RequestConfig<PostV1ExerciseTemplatesMutationRequest>> & {
-    client?: Client;
-  } = {},
-) {
-  const { client: request = fetch, ...requestConfig } = config;
+export function postV1ExerciseTemplates<ThrowOnError extends boolean = true>(
+  options: Options<PostV1ExerciseTemplatesOptions, ThrowOnError>,
+): Unwrappable<RequestResult<PostV1ExerciseTemplatesResponses, ThrowOnError>> {
+  const { client: request = client, ...config } = options;
 
-  const requestData = data;
-
-  const res = await request<
-    PostV1ExerciseTemplatesMutationResponse,
-    ResponseErrorConfig<
-      PostV1ExerciseTemplates400 | PostV1ExerciseTemplates403
+  return withUnwrap(
+    request({
+      method: "POST",
+      url: "/v1/exercise_templates",
+      ...config,
+      throwOnError: config.throwOnError ?? true,
+    }) as Promise<
+      RequestResult<PostV1ExerciseTemplatesResponses, ThrowOnError>
     >,
-    PostV1ExerciseTemplatesMutationRequest
-  >({
-    method: "POST",
-    url: getPostV1ExerciseTemplatesUrl().url.toString(),
-    data: requestData,
-    ...requestConfig,
-    headers: { ...headers, ...requestConfig.headers },
-  });
-  return res.data;
+  );
 }

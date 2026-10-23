@@ -50,4 +50,4 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_OAUTH_KV_NAMESPACE_ID: ${{ vars.CLOUDFLARE_OAUTH_KV_NAMESPACE_ID }}
-        run: pnpm exec wrangler deploy --x-new-config
+        run: pnpm --dir packages/worker exec cf deploy

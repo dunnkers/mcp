@@ -1,22 +1,19 @@
-// Import types from generated client
-import type {
-	GetV1RoutineFoldersFolderid200,
-	PostV1RoutineFolders201,
-} from "@hevy-mcp/hevy-client/types";
-import type { ToolDefinition } from "./define-tool.js";
-import type { ToolRuntime } from "./tool-runtime.js";
+import { Effect } from "effect";
+import type { RoutineFolder } from "@hevy-mcp/hevy-client/types";
 import {
 	createRoutineFolderResponse,
 	routineFolderResponse,
-} from "../utils/response-contracts.js";
+} from "../protocol/response-contracts.js";
 import {
 	createAnnotations,
 	readOnlyAnnotations,
 } from "../utils/tool-annotations.js";
-
+import type { ToolDefinition } from "./define-tool.js";
+import type { ToolRuntime } from "./tool-runtime.js";
+import { HevyOperationsService } from "../runtime/effect-services.js";
 import type { InferToolParams } from "../utils/tool-helpers.js";
 import { nonEmptyId, routineFolderInputFields } from "./input-schemas.js";
-import { isExpectedReadNotFound } from "../utils/hevy-error-policy.js";
+import { operationEffect, requireOperation } from "./operation-helpers.js";
 
 const getRoutineFolderSchema = { folder_id: nonEmptyId } as const;
 type GetRoutineFolderParams = InferToolParams<typeof getRoutineFolderSchema>;
@@ -37,35 +34,36 @@ const getRoutineFolderDefinition = {
 	annotations: readOnlyAnnotations("Get Routine Folder"),
 	kind: "read" as const,
 	responseContract: routineFolderResponse,
-	execute: async (
+	execute: (
 		runtime: ToolRuntime,
 		args: GetRoutineFolderParams,
-	): Promise<{
-		routine_folder: GetV1RoutineFoldersFolderid200 | null | undefined;
-		folder_id: string;
-		expected404Outcome?: "not_found";
-	}> => {
-		const { folder_id } = args;
-		try {
-			const data: GetV1RoutineFoldersFolderid200 | null = await runtime
-				.getClient()
-				.getRoutineFolder(folder_id);
-			return { routine_folder: data, folder_id };
-		} catch (error) {
-			if (isExpectedReadNotFound(error)) {
-				return {
-					routine_folder: null,
-					folder_id,
-					expected404Outcome: "not_found",
-				};
-			}
-			throw error;
-		}
-	},
+	): Effect.Effect<
+		{
+			routine_folder: RoutineFolder | null | undefined;
+			folder_id: string;
+			expected404Outcome?: "not_found";
+		},
+		import("../effect-errors.js").CoreToolError,
+		never
+	> =>
+		operationEffect(
+			requireOperation(
+				runtime.service(HevyOperationsService).folders?.get,
+				"folders.get",
+			),
+			{ folderId: args.folder_id },
+			runtime.execution,
+		).pipe(
+			Effect.map(({ routineFolder, folderId, expected404Outcome }) => ({
+				routine_folder: routineFolder,
+				folder_id: folderId,
+				expected404Outcome,
+			})),
+		),
 } satisfies ToolDefinition<
 	typeof getRoutineFolderSchema,
 	{
-		routine_folder: GetV1RoutineFoldersFolderid200 | null | undefined;
+		routine_folder: RoutineFolder | null | undefined;
 		folder_id: string;
 		expected404Outcome?: "not_found";
 	}
@@ -80,16 +78,20 @@ const createRoutineFolderDefinition = {
 	inputSchema: createRoutineFolderSchema,
 	annotations: createAnnotations("Create Routine Folder"),
 	kind: "write" as const,
+	outputSchema: createRoutineFolderResponse.outputSchema,
 	responseContract: createRoutineFolderResponse,
-	execute: async (
-		runtime: ToolRuntime,
-		args: CreateRoutineFolderParams,
-	): Promise<PostV1RoutineFolders201 | null | undefined> => {
-		return runtime.getClient().createRoutineFolder(args);
-	},
+	execute: (runtime: ToolRuntime, args: CreateRoutineFolderParams) =>
+		operationEffect(
+			requireOperation(
+				runtime.service(HevyOperationsService).folders?.create,
+				"folders.create",
+			),
+			args,
+			runtime.execution,
+		),
 } satisfies ToolDefinition<
 	typeof createRoutineFolderSchema,
-	PostV1RoutineFolders201 | null | undefined
+	RoutineFolder | null | undefined
 >;
 
 export const folderToolDefinitions = [

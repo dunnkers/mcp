@@ -11,7 +11,10 @@ CI (`.github/workflows/deploy-hevy-mcp.yml`) deploys the Worker to
 on demand via the Actions tab (`workflow_dispatch`). The upstream repo's own
 CI/release automation (`servers/hevy-mcp/.github/`) was intentionally removed
 — it assumes chrisdoc's npm-publish/changesets/Docker pipeline, which doesn't
-apply to a personal self-hosted fork.
+apply to a personal self-hosted fork. The one exception is
+`servers/hevy-mcp/.github/workers/preview-bootstrap.ts`, which upstream's
+`packages/worker/cloudflare.config.ts` imports, so it is kept. The deploy
+uses upstream's `cf` CLI (`pnpm --dir packages/worker exec cf deploy`).
 
 ## One-time Cloudflare + GitHub setup
 
@@ -73,3 +76,8 @@ git subtree pull --prefix=servers/hevy-mcp https://github.com/chrisdoc/hevy-mcp.
 Re-check `servers/hevy-mcp/.github/` afterwards — an upstream pull will bring
 its workflows back, and they should be removed again (or deliberately
 reconciled) since this fork doesn't run chrisdoc's release pipeline.
+
+Re-check `packages/worker/src/worker.ts` and `worker-oauth.ts` too: this fork
+advertises the request origin (or the optional `OAUTH_RESOURCE` binding) as the
+OAuth resource and keeps the `enterpriseManagedAuthorization` stub that Claude's
+connector needs, while upstream defaults to its own `https://mcp.hevy-mcp.dev/mcp`.

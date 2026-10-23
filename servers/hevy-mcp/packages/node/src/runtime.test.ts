@@ -61,6 +61,8 @@ const testDoubles = vi.hoisted(() => {
 		captureFailure: vi.fn(),
 		installProcessExceptionTracking: vi.fn(() => vi.fn()),
 		flushTelemetry: vi.fn().mockImplementation(() => Promise.resolve()),
+		createEffectTracer: vi.fn().mockResolvedValue({}),
+		getActiveEffectParentSpan: vi.fn(),
 		serverStartups: { add: vi.fn() },
 		installGracefulShutdown: vi.fn(),
 		instrumentTransport: vi.fn(() => ({ kind: "stdio-transport" })),
@@ -77,6 +79,8 @@ const testDoubles = vi.hoisted(() => {
 
 vi.mock("./utils/telemetry.js", () => ({
 	captureFailure: testDoubles.captureFailure,
+	createEffectTracer: testDoubles.createEffectTracer,
+	getActiveEffectParentSpan: testDoubles.getActiveEffectParentSpan,
 	flushTelemetry: testDoubles.flushTelemetry,
 	tracer: {
 		startActiveSpan: vi.fn((...args: unknown[]) => {
@@ -88,6 +92,7 @@ vi.mock("./utils/telemetry.js", () => ({
 	},
 	serviceName: "hevy-mcp",
 	serviceVersion: "3.4.1",
+	telemetryLayer: undefined,
 	installProcessExceptionTracking: testDoubles.installProcessExceptionTracking,
 }));
 
@@ -159,6 +164,7 @@ vi.mock("./utils/version-check.js", () => ({
 }));
 
 import { createNodeMcpServer, runServer, runStdioServer } from "./runtime.js";
+import { InvalidHevyApiKeyError } from "./utils/startup-errors.js";
 
 const originalArgv = [...process.argv];
 const originalApiKey = process.env.HEVY_API_KEY;
@@ -242,6 +248,13 @@ describe("Node package entrypoint", () => {
 		expect(testDoubles.createNodeToolObserver).toHaveBeenCalledWith({
 			userHash: "0b633a8f53",
 		});
+		expect(testDoubles.createEffectTracer).toHaveBeenCalledOnce();
+		expect(testDoubles.createHevyMcpServer).toHaveBeenCalledWith(
+			expect.objectContaining({
+				effectTracer: {},
+				effectParentSpan: testDoubles.getActiveEffectParentSpan,
+			}),
+		);
 		expect(
 			JSON.stringify(testDoubles.createNodeToolObserver.mock.calls),
 		).not.toContain("programmatic-key");
@@ -610,7 +623,7 @@ describe("Node package entrypoint", () => {
 
 			await expect(
 				createNodeMcpServer({ apiKey: "invalid-key" }),
-			).rejects.toThrow("HEVY_API_KEY is invalid or expired");
+			).rejects.toBeInstanceOf(InvalidHevyApiKeyError);
 			expect(testDoubles.createHevyMcpServer).not.toHaveBeenCalled();
 		},
 	);
