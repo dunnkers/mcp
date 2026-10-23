@@ -1,8 +1,12 @@
+[settings]
+lockfile = true
+
 [tools]
 node = "24"
-pnpm = "12"
-hk = "1.51.0"
-kiota = "latest"
+pnpm = "12.0.0"
+lefthook = "latest"
 pinact = "latest"
-actionlint = "1.7.12"
-zizmor = "1.29.0"
+actionlint = "latest"
+zizmor = "latest"
+entire = "latest"
+1password = "latest"

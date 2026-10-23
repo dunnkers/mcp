@@ -1,81 +1,77 @@
 import { Schema } from "effect";
+import {
+	ApiError,
+	NetworkError,
+	NotFoundError,
+	RateLimitError,
+	ValidationError,
+} from "@hevy-mcp/hevy-client";
+import {
+	EmptyMeasurementUpdateError,
+	PaginationMismatchError,
+	TrainingSummaryDataError,
+	TrainingSummaryValidationError,
+	WorkoutPayloadError,
+	WorkoutPrivacyError,
+	TemplatesSearchValidationError,
+} from "@hevy-mcp/operations";
 
-/** Typed error vocabulary reserved for the Effect-based migration path. */
-export class RateLimitError extends Schema.TaggedError<RateLimitError>()(
-	"RateLimitError",
+/** Errors raised by core before an operation reaches the Hevy client. */
+export class ToolInputValidationError extends Schema.TaggedError<ToolInputValidationError>()(
+	"ToolInputValidationError",
 	{
-		status: Schema.Number,
-		endpoint: Schema.String,
-		method: Schema.String,
-		retryAfterSeconds: Schema.optional(Schema.Number),
+		path: Schema.String,
 	},
-) {}
+) {
+	readonly message = `Invalid input: ${this.path}.`;
+}
 
-export class ValidationError extends Schema.TaggedError<ValidationError>()(
-	"ValidationError",
-	{
-		status: Schema.Number,
-		endpoint: Schema.String,
-		method: Schema.String,
-	},
-) {}
+export class ClientNotInitializedError extends Schema.TaggedError<ClientNotInitializedError>()(
+	"ClientNotInitializedError",
+	{},
+) {
+	readonly message = "API client not initialized. Please provide HEVY_API_KEY.";
+}
 
-export class NotFoundError extends Schema.TaggedError<NotFoundError>()(
-	"NotFoundError",
-	{
-		status: Schema.Number,
-		endpoint: Schema.String,
-		method: Schema.String,
-		expected: Schema.Boolean,
-	},
-) {}
+export class OperationUnavailableError extends Schema.TaggedError<OperationUnavailableError>()(
+	"OperationUnavailableError",
+	{ operation: Schema.String },
+) {
+	readonly message = `Operation ${this.operation} is unavailable.`;
+}
 
-export class NetworkError extends Schema.TaggedError<NetworkError>()(
-	"NetworkError",
-	{
-		code: Schema.String,
-		phase: Schema.optional(
-			Schema.Union([
-				Schema.Literal("before-dispatch"),
-				Schema.Literal("dispatch"),
-				Schema.Literal("response-headers"),
-				Schema.Literal("response-content"),
-				Schema.Literal("backoff"),
-				Schema.Literal("completed"),
-			]),
-		),
-		operationSafety: Schema.optional(
-			Schema.Union([
-				Schema.Literal("read"),
-				Schema.Literal("idempotent-write"),
-				Schema.Literal("non-idempotent-write"),
-			]),
-		),
-		commitState: Schema.optional(
-			Schema.Union([
-				Schema.Literal("not_sent"),
-				Schema.Literal("confirmed"),
-				Schema.Literal("unknown"),
-			]),
-		),
-		safeToRetry: Schema.optional(Schema.Boolean),
-		outcome: Schema.optional(
-			Schema.Union([
-				Schema.Literal("success"),
-				Schema.Literal("expected"),
-				Schema.Literal("retryable_failure"),
-				Schema.Literal("terminal_failure"),
-				Schema.Literal("cancelled"),
-				Schema.Literal("deadline_exceeded"),
-			]),
-		),
-		retryCount: Schema.optional(Schema.Number),
-		retryExhausted: Schema.Boolean,
-	},
-) {}
+export {
+	ApiError,
+	NetworkError,
+	NotFoundError,
+	RateLimitError,
+	ValidationError,
+	EmptyMeasurementUpdateError,
+	PaginationMismatchError,
+	TemplatesSearchValidationError,
+	TrainingSummaryDataError,
+	TrainingSummaryValidationError,
+	WorkoutPayloadError,
+	WorkoutPrivacyError,
+};
 
-export class ApiError extends Schema.TaggedError<ApiError>()("ApiError", {
-	status: Schema.Number,
-	endpoint: Schema.String,
-	method: Schema.String,
-}) {}
+export type OperationDomainError =
+	| EmptyMeasurementUpdateError
+	| PaginationMismatchError
+	| TemplatesSearchValidationError
+	| TrainingSummaryDataError
+	| TrainingSummaryValidationError
+	| WorkoutPayloadError
+	| WorkoutPrivacyError;
+
+/** The complete recoverable error vocabulary exposed by core tool handlers. */
+export type CoreToolError =
+	| ToolInputValidationError
+	| ClientNotInitializedError
+	| OperationUnavailableError
+	| ApiError
+	| NetworkError
+	| NotFoundError
+	| RateLimitError
+	| ValidationError
+	| OperationDomainError;

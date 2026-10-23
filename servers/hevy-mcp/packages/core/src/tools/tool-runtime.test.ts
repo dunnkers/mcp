@@ -1,14 +1,260 @@
 import { describe, expect, it, vi } from "vitest";
+import { Context, Effect, Layer, Option } from "effect";
+import {
+	ExerciseTemplateCatalogService,
+	HevyClientService,
+	HevyOperationsService,
+	ToolExecutionContextService,
+	ToolObserverService,
+} from "../runtime/effect-services.js";
 import { createMockHevyClient } from "../../test-fixtures/mock-hevy.js";
-import { createToolRuntime } from "./tool-runtime.js";
+import {
+	createToolRuntime,
+	HEVY_CLIENT_NOT_INITIALIZED_ERROR,
+	type ToolHandler,
+	type ToolHandlerFactory,
+} from "./tool-runtime.js";
+import type { McpToolResponse } from "../protocol/response-contracts.js";
+import { createOperations } from "@hevy-mcp/operations";
 
 const runImmediately = <T>(operation: () => Promise<T>): Promise<T> =>
 	operation();
 
 const catalog = {
+	effect: () => Effect.succeed([]),
 	get: () => Promise.resolve([]),
-	reset: () => undefined,
+	reset: () => Effect.void,
+	close: () => Effect.void,
 };
+
+function resolveRuntimeServices(runtime: ReturnType<typeof createToolRuntime>) {
+	if (!runtime.layer) {
+		throw new Error("Expected runtime to provide a service layer");
+	}
+	return Effect.runSync(Effect.scoped(Layer.build(runtime.layer)));
+}
+
+describe("createToolRuntime service layer", () => {
+	it("throws the canonical not-initialized error for client service lookup without a client", () => {
+		const runtime = createToolRuntime({
+			client: null,
+			operations: createOperations(createMockHevyClient()),
+			catalog,
+		});
+
+		expect(() => runtime.service(HevyClientService)).toThrowError(
+			HEVY_CLIENT_NOT_INITIALIZED_ERROR,
+		);
+		expect(() => runtime.getClient()).toThrowError(
+			HEVY_CLIENT_NOT_INITIALIZED_ERROR,
+		);
+	});
+
+	it("provides core services from the objects passed to the runtime", () => {
+		const client = createMockHevyClient();
+		const operations = createOperations(client);
+		const execution = {
+			requestId: "request-1",
+			deadline: 123,
+		};
+		const runtime = createToolRuntime({
+			client,
+			operations,
+			catalog,
+			execution,
+		});
+		const services = resolveRuntimeServices(runtime);
+
+		expect(Context.get(services, HevyClientService)).toBe(runtime.getClient());
+		expect(Context.get(services, HevyOperationsService)).toBe(operations);
+		expect(Context.get(services, ExerciseTemplateCatalogService)).toBe(
+			runtime.catalog,
+		);
+		expect(Context.get(services, ToolExecutionContextService)).toBe(execution);
+		expect(runtime.getClient()).toBe(Context.get(services, HevyClientService));
+		expect(runtime.service(HevyClientService)).toBe(runtime.getClient());
+		expect(runtime.getOperations()).toBe(
+			Context.get(services, HevyOperationsService),
+		);
+		expect(runtime.service(HevyOperationsService)).toBe(
+			runtime.getOperations(),
+		);
+	});
+
+	it("composes the observer service only when an observer is configured", () => {
+		const withObserver = { start: vi.fn() };
+		const observedRuntime = createToolRuntime({
+			client: createMockHevyClient(),
+			catalog,
+			observer: withObserver,
+		});
+		const observedServices = resolveRuntimeServices(observedRuntime);
+		expect(Context.get(observedServices, ToolObserverService)).toBe(
+			withObserver,
+		);
+
+		const unobservedRuntime = createToolRuntime({
+			client: createMockHevyClient(),
+			catalog,
+		});
+		const unobservedServices = resolveRuntimeServices(unobservedRuntime);
+		expect(Context.getOption(unobservedServices, ToolObserverService)).toBe(
+			Option.none(),
+		);
+	});
+
+	it("rebinds execution-scoped client, catalog, and context without rebinding operations", () => {
+		const client = createMockHevyClient();
+		const operations = createOperations(client);
+		const runtime = createToolRuntime({
+			client,
+			operations,
+			catalog,
+		});
+		const signal = new AbortController().signal;
+		const scoped = runtime.forExecution({ signal, deadline: 456 });
+		const parentServices = resolveRuntimeServices(runtime);
+		const scopedServices = resolveRuntimeServices(scoped);
+
+		expect(Context.get(parentServices, HevyClientService)).toBe(client);
+		expect(Context.get(scopedServices, HevyClientService)).toBe(
+			scoped.getClient(),
+		);
+		expect(Context.get(scopedServices, HevyClientService)).not.toBe(client);
+		expect(Context.get(scopedServices, ExerciseTemplateCatalogService)).toBe(
+			scoped.catalog,
+		);
+		expect(scoped.catalog).not.toBe(catalog);
+		expect(Context.get(scopedServices, ToolExecutionContextService)).toBe(
+			scoped.execution,
+		);
+		expect(Context.get(scopedServices, HevyOperationsService)).toBe(operations);
+		expect(Context.get(parentServices, ExerciseTemplateCatalogService)).toBe(
+			catalog,
+		);
+		expect(Context.get(parentServices, HevyOperationsService)).toBe(operations);
+	});
+});
+
+describe("createToolRuntime handler factory composition", () => {
+	it("interrupts an in-flight effect when the request signal aborts", async () => {
+		const controller = new AbortController();
+		const runtime = createToolRuntime({
+			client: null,
+			catalog,
+		});
+		const handler = runtime.createHandler(() => Effect.never, "get-workout");
+
+		const result = handler({}, { signal: controller.signal });
+		controller.abort();
+
+		await expect(result).resolves.toMatchObject({
+			isError: true,
+			content: [
+				{ text: expect.stringContaining("request was canceled by the client") },
+			],
+		});
+	});
+
+	it("bounds handlers by an expired constructor deadline even without forExecution", async () => {
+		const runtime = createToolRuntime({
+			client: null,
+			catalog,
+			executionDeadline: Date.now() - 1,
+		});
+		const result = await runtime.createHandler(
+			() => Effect.never,
+			"get-workout",
+		)({});
+
+		expect(result).toMatchObject({
+			isError: true,
+			errorOutcome: expect.objectContaining({
+				code: "HEVY_DEADLINE_EXCEEDED",
+				outcome: "deadline_exceeded",
+			}),
+		});
+	});
+
+	it("invokes the caller-supplied createHandler when an observer is configured", async () => {
+		const finish = vi.fn();
+		const start = vi.fn(() => ({ run: runImmediately, finish }));
+		const customHandler: ToolHandler = () =>
+			Promise.resolve({ content: [{ type: "text", text: "custom" }] });
+		const createHandler: ToolHandlerFactory = vi.fn(() => customHandler);
+		const runtime = createToolRuntime({
+			client: null,
+			catalog,
+			createHandler,
+			observer: { start },
+		});
+
+		const handler = runtime.createHandler(
+			() => Effect.succeed({ content: [{ type: "text", text: "default" }] }),
+			"get-workout",
+		);
+
+		await expect(handler({})).resolves.toMatchObject({
+			content: [{ text: "custom" }],
+		});
+		expect(createHandler).toHaveBeenCalledOnce();
+		expect(createHandler).toHaveBeenCalledWith(
+			expect.any(Function),
+			"get-workout",
+			undefined,
+		);
+		expect(start).toHaveBeenCalledOnce();
+		expect(finish).toHaveBeenCalledWith(
+			expect.objectContaining({ outcome: "success" }),
+		);
+	});
+
+	it("observes and wraps errors thrown by a custom createHandler handler", async () => {
+		const finish = vi.fn();
+		const start = vi.fn(() => ({ run: runImmediately, finish }));
+		const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+		const runtime = createToolRuntime({
+			client: null,
+			catalog,
+			createHandler: () => (): Promise<McpToolResponse> =>
+				Promise.reject(new Error("custom failure sentinel")),
+			observer: { start },
+		});
+
+		const result = await runtime.createHandler(
+			() => Effect.succeed({ content: [] }),
+			"get-workout",
+		)({});
+
+		expect(result).toMatchObject({ isError: true });
+		expect(finish).toHaveBeenCalledWith(
+			expect.objectContaining({ outcome: "thrown_error" }),
+		);
+		stderr.mockRestore();
+	});
+
+	it("keeps the caller-supplied createHandler when no observer is configured", async () => {
+		const start = vi.fn();
+		const customHandler: ToolHandler = () =>
+			Promise.resolve({ content: [{ type: "text", text: "custom" }] });
+		const createHandler: ToolHandlerFactory = vi.fn(() => customHandler);
+		const runtime = createToolRuntime({
+			client: null,
+			catalog,
+			createHandler,
+			observer: undefined,
+		});
+
+		await expect(
+			runtime.createHandler(
+				() => Effect.succeed({ content: [{ type: "text", text: "default" }] }),
+				"get-workout",
+			)({}),
+		).resolves.toMatchObject({ content: [{ text: "custom" }] });
+		expect(createHandler).toHaveBeenCalledOnce();
+		expect(start).not.toHaveBeenCalled();
+	});
+});
 
 describe("createToolRuntime observation scope", () => {
 	it("does not execute a write handler twice when run instrumentation fails", async () => {
@@ -28,7 +274,7 @@ describe("createToolRuntime observation scope", () => {
 		});
 		const handler = runtime.createHandler(() => {
 			executions += 1;
-			return Promise.resolve({ content: [{ type: "text", text: "ok" }] });
+			return Effect.succeed({ content: [{ type: "text", text: "ok" }] });
 		}, "create-workout");
 
 		await expect(handler({ id: "workout-id" })).resolves.toMatchObject({
@@ -42,7 +288,7 @@ describe("createToolRuntime observation scope", () => {
 		let active = false;
 		const handler = vi.fn(() => {
 			expect(active).toBe(true);
-			return Promise.resolve({
+			return Effect.succeed({
 				content: [{ type: "text" as const, text: "ok" }],
 			});
 		});
@@ -70,7 +316,9 @@ describe("createToolRuntime observation scope", () => {
 	it("reuses the handler result when run fails after invoking it", async () => {
 		const handler = vi
 			.fn()
-			.mockResolvedValue({ content: [{ type: "text", text: "ok" }] });
+			.mockReturnValue(
+				Effect.succeed({ content: [{ type: "text", text: "ok" }] }),
+			);
 		const runtime = createToolRuntime({
 			client: null,
 			catalog,
@@ -103,7 +351,7 @@ describe("createToolRuntime observation scope", () => {
 		});
 		const secret = "private-routine-title-sentinel";
 		const handler = runtime.createHandler(
-			() => Promise.resolve({ content: [] }),
+			() => Effect.succeed({ content: [] }),
 			"list-routines",
 			{ feature: "routines", kind: "read", operation: "list" },
 		);
@@ -157,7 +405,7 @@ describe("createToolRuntime observation scope", () => {
 		}));
 
 		await runtime.createHandler(
-			() => Promise.resolve({ content }),
+			() => Effect.succeed({ content }),
 			"list-workouts",
 		)({});
 
@@ -187,7 +435,7 @@ describe("createToolRuntime observation scope", () => {
 		const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
 
 		const result = await runtime.createHandler(
-			() => Promise.reject(new Error(secret)),
+			() => Effect.die(new Error(secret)),
 			"get-workouts",
 		)({});
 

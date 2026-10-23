@@ -1,18 +1,14 @@
 /* oxlint-disable typescript/unbound-method */
 import type { HevyClient } from "@hevy-mcp/hevy-client";
 import { describe, expect, it, vi } from "vitest";
+import { createMockHevyClient } from "../../test-fixtures/mock-hevy.js";
 import { createToolRuntime } from "./tool-runtime.js";
 import { folderToolDefinitions } from "./folders.js";
 import { registerToolDefinition, type ToolRegistrar } from "./define-tool.js";
 import type { InferToolParams } from "../utils/tool-helpers.js";
-
 type FolderToolArgs =
 	| InferToolParams<(typeof folderToolDefinitions)[0]["inputSchema"]>
 	| InferToolParams<(typeof folderToolDefinitions)[1]["inputSchema"]>;
-
-function mockOf<T>(value: Partial<T>): T {
-	return value as T;
-}
 
 function register(client: HevyClient | null) {
 	const tool = vi.fn();
@@ -33,9 +29,8 @@ function handler(tool: { mock: { calls: unknown[][] } }, name: string) {
 
 describe("routine folder tools", () => {
 	it("maps snake_case pagination and folder identifiers", async () => {
-		const client = mockOf<HevyClient>({
-			getRoutineFolder: vi.fn().mockResolvedValue({ id: 3, title: "Strength" }),
-		});
+		const client = createMockHevyClient();
+		client.getRoutineFolder.mockResolvedValue({ id: 3, title: "Strength" });
 		const tool = register(client);
 
 		await handler(tool, "get-routine-folder")({ folder_id: "3" });
@@ -43,10 +38,9 @@ describe("routine folder tools", () => {
 	});
 
 	it("wraps folder creation in the generated request envelope", async () => {
-		const client = mockOf<HevyClient>({
-			createRoutineFolder: vi
-				.fn()
-				.mockResolvedValue({ id: 4, title: "Strength" }),
+		const client = createMockHevyClient();
+		client.createRoutineFolder.mockResolvedValue({
+			routine_folder: { id: 4, title: "Strength" },
 		});
 		const tool = register(client);
 		await handler(
@@ -55,6 +49,22 @@ describe("routine folder tools", () => {
 		)({ routine_folder: { title: "Strength" } });
 		expect(client.createRoutineFolder).toHaveBeenCalledWith({
 			routine_folder: { title: "Strength" },
+		});
+	});
+
+	it("confirms folder creation without an ID when the response has no body", async () => {
+		const client = createMockHevyClient();
+		client.createRoutineFolder.mockResolvedValue(undefined as never);
+		const tool = register(client);
+
+		const response = await handler(
+			tool,
+			"create-routine-folder",
+		)({ routine_folder: { title: "Strength" } });
+
+		expect(response).not.toMatchObject({ isError: true });
+		expect(response).toMatchObject({
+			structuredContent: { created: true, folder_id: null },
 		});
 	});
 });

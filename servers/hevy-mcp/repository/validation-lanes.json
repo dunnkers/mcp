@@ -11,7 +11,7 @@
 		},
 		"workerd": {
 			"kind": "workerd",
-			"version": "wrangler-local"
+			"version": "cloudflare-vite-plugin-local"
 		}
 	},
 	"lanes": [
@@ -69,7 +69,7 @@
 					"packages/node/src/index.test.ts",
 					"packages/node/src/utils/config.test.ts",
 					"packages/core/src/tools/register.test.ts",
-					"packages/core/src/utils/output-schemas.test.ts",
+					"packages/core/src/protocol/output-schemas.test.ts",
 					"tests/unit/server-manifest.test.ts",
 					"tests/contract/runtime-contract-matrix.test.ts"
 				]
@@ -313,6 +313,20 @@
 			"mappingStatus": "mapped"
 		},
 		{
+			"id": "duplication",
+			"alias": "check:duplication",
+			"selector": {
+				"kind": "repository-check"
+			},
+			"runtimes": ["node-24", "node-26"],
+			"credentials": [],
+			"artifacts": [],
+			"gate": "blocking",
+			"comparison": "duplication-threshold",
+			"nxTarget": "check:duplication",
+			"mappingStatus": "mapped"
+		},
+		{
 			"id": "build",
 			"alias": "build",
 			"selector": {
@@ -331,7 +345,7 @@
 			"id": "worker-bundle",
 			"alias": "worker:dry-run",
 			"selector": {
-				"kind": "wrangler-dry-run"
+				"kind": "cf-dry-run"
 			},
 			"runtimes": ["workerd"],
 			"workflowRuntimes": ["node-24"],
@@ -501,7 +515,162 @@
 				"performance"
 			],
 			"workflowRuntimes": {
-				"worker": ["node-24"]
+				"worker": ["node-24"],
+				"repository-control-plane": ["node-24"],
+				"package-boundaries": ["node-24"],
+				"package-exports": ["node-24"],
+				"types": ["node-24"],
+				"server-manifest": ["node-24"],
+				"check": ["node-24"],
+				"build": ["node-24"],
+				"mocked-mcp": ["node-24"],
+				"unit": ["node-24"]
+			},
+			"workflowEnvironment": {
+				"unit": {
+					"node-24": {
+						"HEVY_TEST_REPORT_MODE": "ci"
+					}
+				},
+				"types": {
+					"node-24": {
+						"HEVY_TEST_REPORT_MODE": "ci"
+					}
+				},
+				"check": {
+					"node-24": {
+						"HEVY_TEST_REPORT_MODE": "ci"
+					}
+				},
+				"worker-bundle": {
+					"node-24": {
+						"HEVY_TEST_REPORT_MODE": "ci"
+					}
+				},
+				"worker-http": {
+					"node-24": {
+						"HEVY_TEST_REPORT_MODE": "ci"
+					}
+				},
+				"contract": {
+					"node-24": {
+						"HEVY_TEST_REPORT_MODE": "ci"
+					}
+				},
+				"cli": {
+					"node-24": {
+						"HEVY_TEST_REPORT_MODE": "ci"
+					}
+				},
+				"worker": {
+					"node-24": {
+						"HEVY_TEST_REPORT_MODE": "ci"
+					}
+				},
+				"mocked-mcp": {
+					"node-24": {
+						"HEVY_TEST_REPORT_MODE": "ci"
+					}
+				},
+				"repository-control-plane": {
+					"node-24": {
+						"HEVY_TEST_REPORT_MODE": "ci"
+					}
+				},
+				"package-exports": {
+					"node-24": {
+						"HEVY_TEST_REPORT_MODE": "ci"
+					}
+				},
+				"package-boundaries": {
+					"node-24": {
+						"HEVY_TEST_REPORT_MODE": "ci"
+					}
+				}
+			},
+			"integration": "github-actions",
+			"nxTarget": null,
+			"mappingStatus": "external"
+		},
+		"node-compatibility-ci": {
+			"external": true,
+			"lanes": [
+				"build",
+				"unit",
+				"types",
+				"check",
+				"server-manifest",
+				"mocked-mcp",
+				"repository-control-plane",
+				"package-boundaries",
+				"package-exports"
+			],
+			"workflowRuntimes": {
+				"build": ["node-26"],
+				"unit": ["node-26"],
+				"types": ["node-26"],
+				"check": ["node-26"],
+				"server-manifest": ["node-26"],
+				"mocked-mcp": ["node-26"],
+				"repository-control-plane": ["node-26"],
+				"package-boundaries": ["node-26"],
+				"package-exports": ["node-26"]
+			},
+			"workflowEnvironment": {
+				"build": {
+					"node-26": {
+						"HEVY_TEST_REPORT_MODE": "ci",
+						"MISE_DISABLE_TOOLS": "node"
+					}
+				},
+				"unit": {
+					"node-26": {
+						"HEVY_TEST_REPORT_MODE": "ci",
+						"MISE_DISABLE_TOOLS": "node"
+					}
+				},
+				"types": {
+					"node-26": {
+						"HEVY_TEST_REPORT_MODE": "ci",
+						"MISE_DISABLE_TOOLS": "node"
+					}
+				},
+				"check": {
+					"node-26": {
+						"HEVY_TEST_REPORT_MODE": "ci",
+						"MISE_DISABLE_TOOLS": "node"
+					}
+				},
+				"server-manifest": {
+					"node-26": {
+						"HEVY_TEST_REPORT_MODE": "ci",
+						"MISE_DISABLE_TOOLS": "node"
+					}
+				},
+				"mocked-mcp": {
+					"node-26": {
+						"HEVY_TEST_REPORT_MODE": "ci",
+						"MISE_DISABLE_TOOLS": "node"
+					}
+				},
+				"repository-control-plane": {
+					"node-26": {
+						"HEVY_TEST_REPORT_MODE": "ci",
+						"MISE_DISABLE_TOOLS": "node"
+					}
+				},
+				"package-boundaries": {
+					"node-26": {
+						"HEVY_TEST_REPORT_MODE": "ci",
+						"MISE_DISABLE_TOOLS": "node"
+					}
+				},
+				"package-exports": {
+					"node-26": {
+						"HEVY_TEST_REPORT_MODE": "ci",
+						"MISE_DISABLE_TOOLS": "node"
+					}
+				}
 			},
 			"integration": "github-actions",
 			"nxTarget": null,
@@ -519,7 +688,8 @@
 				"package-publint",
 				"release-integration",
 				"nightly",
-				"worker-http-live"
+				"worker-http-live",
+				"performance"
 			],
 			"workflowRuntimes": {
 				"build": ["node-24"],
@@ -531,7 +701,13 @@
 			"mappingStatus": "mapped"
 		},
 		"pre-push": {
-			"lanes": ["types", "changeset-status", "pull-request"],
+			"lanes": [
+				"check",
+				"types",
+				"repository-control-plane",
+				"changeset-status",
+				"pull-request"
+			],
 			"nxTarget": "pre-push",
 			"mappingStatus": "mapped"
 		}

@@ -3,50 +3,28 @@
  * Do not edit manually.
  */
 
-import fetch from "../../../fetch.ts";
+import type { Options, Unwrappable, RequestResult } from "../../.kubb/client";
 import type {
-  Client,
-  RequestConfig,
-  ResponseErrorConfig,
-} from "../../../fetch.ts";
-import type {
-  PostV1BodyMeasurementsMutationRequest,
-  PostV1BodyMeasurementsMutationResponse,
-  PostV1BodyMeasurementsHeaderParams,
-  PostV1BodyMeasurements400,
-  PostV1BodyMeasurements409,
-} from "../types/PostV1BodyMeasurements.ts";
-
-function getPostV1BodyMeasurementsUrl() {
-  const res = { method: "POST", url: `/v1/body_measurements` as const };
-  return res;
-}
+  PostV1BodyMeasurementsOptions,
+  PostV1BodyMeasurementsResponses,
+} from "../types/PostV1BodyMeasurements";
+import { client, withUnwrap } from "../../.kubb/client";
 
 /**
  * @summary Create a body measurement entry for a given date. Returns 409 if an entry already exists for that date.
  * {@link /v1/body_measurements}
  */
-export async function postV1BodyMeasurements(
-  data: PostV1BodyMeasurementsMutationRequest,
-  headers: PostV1BodyMeasurementsHeaderParams,
-  config: Partial<RequestConfig<PostV1BodyMeasurementsMutationRequest>> & {
-    client?: Client;
-  } = {},
-) {
-  const { client: request = fetch, ...requestConfig } = config;
+export function postV1BodyMeasurements<ThrowOnError extends boolean = true>(
+  options: Options<PostV1BodyMeasurementsOptions, ThrowOnError>,
+): Unwrappable<RequestResult<PostV1BodyMeasurementsResponses, ThrowOnError>> {
+  const { client: request = client, ...config } = options;
 
-  const requestData = data;
-
-  const res = await request<
-    PostV1BodyMeasurementsMutationResponse,
-    ResponseErrorConfig<PostV1BodyMeasurements400 | PostV1BodyMeasurements409>,
-    PostV1BodyMeasurementsMutationRequest
-  >({
-    method: "POST",
-    url: getPostV1BodyMeasurementsUrl().url.toString(),
-    data: requestData,
-    ...requestConfig,
-    headers: { ...headers, ...requestConfig.headers },
-  });
-  return res.data;
+  return withUnwrap(
+    request({
+      method: "POST",
+      url: "/v1/body_measurements",
+      ...config,
+      throwOnError: config.throwOnError ?? true,
+    }) as Promise<RequestResult<PostV1BodyMeasurementsResponses, ThrowOnError>>,
+  );
 }

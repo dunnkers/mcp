@@ -1,5 +1,6 @@
 /* oxlint-disable typescript/unbound-method */
 import type { HevyClient } from "@hevy-mcp/hevy-client";
+import { Effect } from "effect";
 import { z } from "zod";
 import {
 	createMockHevyClient,
@@ -12,12 +13,16 @@ import {
 	workoutsGetDescriptor,
 	workoutsListDescriptor,
 } from "@hevy-mcp/operations";
-import type { ToolExecutionContext } from "../execution.js";
+import type { ToolExecutionContext } from "../runtime/execution.js";
 import { describe, expect, it, vi } from "vitest";
 import { createToolRuntime } from "./tool-runtime.js";
-import { registerToolDefinition } from "./define-tool.js";
+import {
+	getRegisteredToolConfig,
+	registerToolDefinition,
+} from "./define-tool.js";
 import { workoutToolDefinitions } from "./workouts.js";
 import { workoutInputSchema } from "./input-schemas.js";
+import { HevyOperationsService } from "../runtime/effect-services.js";
 type WorkoutToolArgs = Parameters<
 	(typeof workoutToolDefinitions)[number]["execute"]
 >[1];
@@ -34,6 +39,14 @@ function register(
 		execution,
 		catalog: {} as never,
 	});
+	for (const definition of workoutToolDefinitions) {
+		registerToolDefinition(server, runtime, definition);
+	}
+	return tool;
+}
+
+function registerRuntime(runtime: ReturnType<typeof createToolRuntime>) {
+	const { server, registerTool: tool } = createMockMcpServer();
 	for (const definition of workoutToolDefinitions) {
 		registerToolDefinition(server, runtime, definition);
 	}
@@ -107,31 +120,49 @@ describe("workout tools", () => {
 	});
 
 	it("uses the injected workout get operation and execution context", async () => {
-		const workoutsGetExecute = vi.fn().mockResolvedValue({
-			workout: { id: "w1", title: "Push" },
-		});
-		const workoutsListExecute = vi.fn();
-		const routinesGetExecute = vi.fn();
-		const routinesListExecute = vi.fn();
+		const workoutsGetEffect = vi.fn(() =>
+			Effect.succeed({
+				workout: { id: "w1", title: "Push" },
+			}),
+		);
+		const workoutsListEffect = vi.fn(() =>
+			Effect.succeed({
+				items: [],
+				page: 1,
+				pageCount: 1,
+			}),
+		);
+		const routinesGetEffect = vi.fn(() => Effect.succeed({ routine: null }));
+		const routinesListEffect = vi.fn(() =>
+			Effect.succeed({
+				items: [],
+				page: 1,
+				pageCount: 1,
+			}),
+		);
 		const operations: HevyOperations = {
 			workouts: {
 				get: {
 					descriptor: workoutsGetDescriptor,
-					execute: workoutsGetExecute,
+					effect: workoutsGetEffect,
+					execute: vi.fn(),
 				},
 				list: {
 					descriptor: workoutsListDescriptor,
-					execute: workoutsListExecute,
+					effect: workoutsListEffect,
+					execute: vi.fn(),
 				},
 			},
 			routines: {
 				get: {
 					descriptor: routinesGetDescriptor,
-					execute: routinesGetExecute,
+					effect: routinesGetEffect,
+					execute: vi.fn(),
 				},
 				list: {
 					descriptor: routinesListDescriptor,
-					execute: routinesListExecute,
+					effect: routinesListEffect,
+					execute: vi.fn(),
 				},
 			},
 		};
@@ -148,7 +179,7 @@ describe("workout tools", () => {
 			workout_id: "w1",
 		});
 
-		expect(workoutsGetExecute).toHaveBeenCalledWith(
+		expect(workoutsGetEffect).toHaveBeenCalledWith(
 			{ workoutId: "w1" },
 			execution,
 		);
@@ -158,6 +189,83 @@ describe("workout tools", () => {
 			},
 		});
 		expect(response).toMatchObject({ content: [{ type: "text" }] });
+	});
+
+	it("resolves both read operations from the service layer, not the getter", async () => {
+		const layerWorkoutsGet = vi.fn(() =>
+			Effect.succeed({
+				workout: { id: "layer-workout", title: "Layer workout" },
+			}),
+		);
+		const layerWorkoutsList = vi.fn(() =>
+			Effect.succeed({
+				items: [],
+				page: 1,
+				pageCount: 1,
+			}),
+		);
+		const layerOperations: HevyOperations = {
+			workouts: {
+				get: {
+					descriptor: workoutsGetDescriptor,
+					effect: layerWorkoutsGet,
+					execute: vi.fn(),
+				},
+				list: {
+					descriptor: workoutsListDescriptor,
+					effect: layerWorkoutsList,
+					execute: vi.fn(),
+				},
+			},
+			routines: {
+				get: {
+					descriptor: routinesGetDescriptor,
+					effect: vi.fn(),
+					execute: vi.fn(),
+				},
+				list: {
+					descriptor: routinesListDescriptor,
+					effect: vi.fn(),
+					execute: vi.fn(),
+				},
+			},
+		};
+		const getterOperations: HevyOperations = {
+			...layerOperations,
+			workouts: {
+				get: {
+					...layerOperations.workouts.get,
+					effect: vi.fn(() => Effect.die(new Error("wrong source"))),
+				},
+				list: {
+					...layerOperations.workouts.list,
+					effect: vi.fn(() => Effect.die(new Error("wrong source"))),
+				},
+			},
+		};
+		const runtime = createToolRuntime({
+			client: createMockHevyClient(),
+			operations: layerOperations,
+			catalog: {} as never,
+		});
+		const getOperations = vi
+			.spyOn(runtime, "getOperations")
+			.mockReturnValue(getterOperations);
+		expect(runtime.service(HevyOperationsService)).toBe(layerOperations);
+		const tool = registerRuntime(runtime);
+
+		await toolHandler(tool, "get-workouts")({ page: 1, page_size: 5 });
+		await toolHandler(tool, "get-workout")({ workout_id: "layer-workout" });
+
+		expect(layerWorkoutsList).toHaveBeenCalledWith(
+			{ page: 1, pageSize: 5 },
+			undefined,
+		);
+		expect(layerWorkoutsGet).toHaveBeenCalledWith(
+			{ workoutId: "layer-workout" },
+			undefined,
+		);
+		expect(getOperations).not.toHaveBeenCalled();
 	});
 
 	it("gets before patching metadata and sends the exact built payload", async () => {
@@ -357,5 +465,90 @@ describe("workout tools", () => {
 		expect(response).toMatchObject({ isError: true });
 		expect(client.getWorkout).toHaveBeenCalledTimes(1);
 		expect(client.updateWorkout).toHaveBeenCalledTimes(1);
+	});
+
+	it("accepts string RPE in create-workout and casts it to numeric RPE for downstream Hevy client", async () => {
+		const client = createMockHevyClient();
+		client.createWorkout.mockResolvedValue({ id: "w-rpe-test" });
+		const tool = register(client);
+
+		const input = workoutInputSchema.parse({
+			workout: {
+				title: "Strength with RPE",
+				start_time: "2026-07-29T08:00:00Z",
+				end_time: "2026-07-29T09:00:00Z",
+				is_private: false,
+				exercises: [
+					{
+						exercise_template_id: "bench",
+						sets: [
+							{ type: "normal", reps: 8, weight_kg: 80, rpe: "8.5" },
+							{ type: "normal", reps: 8, weight_kg: 80, rpe: 9 },
+						],
+					},
+				],
+			},
+		});
+
+		const response = await toolHandler(tool, "create-workout")(input);
+
+		expect(response).not.toMatchObject({ isError: true });
+		expect(client.createWorkout).toHaveBeenCalledWith({
+			workout: expect.objectContaining({
+				exercises: [
+					expect.objectContaining({
+						sets: [
+							expect.objectContaining({ rpe: 8.5 }),
+							expect.objectContaining({ rpe: 9 }),
+						],
+					}),
+				],
+			}),
+		});
+	});
+
+	it("ensures create-workout input schema advertises string enums for RPE to satisfy Gemini/Vertex AI", () => {
+		const def = workoutToolDefinitions.find((d) => d.name === "create-workout");
+		expect(def).toBeDefined();
+		if (!def) throw new Error("create-workout definition not found");
+		const config = getRegisteredToolConfig(def);
+		const jsonSchema = config.inputSchema["~standard"].jsonSchema.input({
+			target: "draft-2020-12",
+		});
+
+		expect(jsonSchema).toMatchObject({
+			type: "object",
+			properties: {
+				workout: {
+					properties: {
+						exercises: {
+							items: {
+								properties: {
+									sets: {
+										items: {
+											properties: {
+												rpe: {
+													type: ["string", "null"],
+													enum: expect.arrayContaining([
+														"6",
+														"7",
+														"7.5",
+														"8",
+														"8.5",
+														"9",
+														"9.5",
+														"10",
+													]),
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		});
 	});
 });

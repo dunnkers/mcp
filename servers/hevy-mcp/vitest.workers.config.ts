@@ -1,15 +1,19 @@
-import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
 	plugins: [
 		cloudflareTest({
-			wrangler: {
-				configPath: "./wrangler.test.jsonc",
+			experimental: {
+				newConfig: {
+					configPath: "./packages/worker/cloudflare.config.ts",
+				},
 			},
 		}),
 	],
 	test: {
+		// Keep vitest 4 mock semantics (see vitest.config.ts).
+		clearMocks: false,
 		// Workerd cold starts can exceed Vitest's five-second default on shared
 		// runners; keep the test lane reliable before caching its result.
 		testTimeout: 15_000,

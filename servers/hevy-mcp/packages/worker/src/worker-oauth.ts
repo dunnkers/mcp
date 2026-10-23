@@ -6,7 +6,10 @@ import {
 	type OAuthHelpers,
 } from "@cloudflare/workers-oauth-provider";
 import { z } from "zod";
-import { createSafeErrorDiagnostic } from "@hevy-mcp/core";
+import {
+	createSafeErrorDiagnostic,
+	formatSafeErrorLogMessage,
+} from "@hevy-mcp/core";
 import { DEFAULT_API_TIMEOUT_MS } from "@hevy-mcp/hevy-client";
 import { executionOutcome, executionResponse } from "./execution-response.js";
 
@@ -148,7 +151,7 @@ const authRequestSchema = z.looseObject({
 	state: z.string(),
 	codeChallenge: z.string().min(1),
 	codeChallengeMethod: z.literal("S256"),
-	resource: z.union([z.string(), z.array(z.string())]).optional(),
+	resource: z.string().optional(),
 });
 
 export function validateAuthRequest<T>(value: T): AuthRequest | null {
@@ -333,10 +336,12 @@ function jsonValidationFailure<T>(error: T, request: Request): Response {
 
 /** Settle "what did Hevy actually return" for a validation failure incident. */
 function logOAuthValidationFailure<T>(context: string, error: T): void {
+	const diagnostic = createSafeErrorDiagnostic(error);
 	console.error({
 		event: "worker.error",
+		message: formatSafeErrorLogMessage(context, error, diagnostic),
 		context,
-		...createSafeErrorDiagnostic(error),
+		...diagnostic,
 	});
 }
 
@@ -458,10 +463,16 @@ export async function handleAuthorizePost<Env>(
 			headers: { Location: redirectTo, "Cache-Control": "no-store" },
 		});
 	} catch (error) {
+		const diagnostic = createSafeErrorDiagnostic(error);
 		console.error({
 			event: "worker.error",
+			message: formatSafeErrorLogMessage(
+				"oauth-complete-authorization",
+				error,
+				diagnostic,
+			),
 			context: "oauth-complete-authorization",
-			...createSafeErrorDiagnostic(error),
+			...diagnostic,
 		});
 		return authorizeErrorResponse(
 			"Authorization could not be completed. Please try again.",
@@ -470,10 +481,13 @@ export async function handleAuthorizePost<Env>(
 	}
 }
 
-function oauthUnauthorizedResponse(request: Request): Response {
-	const url = new URL(request.url);
-	const resourceMetadataUrl =
-		`${url.origin}/.well-known/oauth-protected-resource` + url.pathname;
+function oauthUnauthorizedResponse(resourceUrl: string): Response {
+	// Mirrors how the OAuth provider derives its RFC 9728 metadata URL from the
+	// configured resource: the resource path (none for a bare origin) is
+	// appended to the well-known prefix.
+	const resource = new URL(resourceUrl);
+	const resourcePath = resource.pathname === "/" ? "" : resource.pathname;
+	const resourceMetadataUrl = `${resource.origin}/.well-known/oauth-protected-resource${resourcePath}`;
 	return new Response("Unauthorized", {
 		status: 401,
 		headers: {
@@ -491,12 +505,13 @@ async function handleAuthorizedMcpRequest<Env>(
 	env: Env,
 	ctx: ExecutionContext,
 	dependencies: HevyOAuthDependencies<Env>,
+	resourceUrl: string,
 ): Promise<Response> {
 	const deadline = Date.now() + WORKER_INVOCATION_TIMEOUT_MS;
 	const props = (ctx as { props?: Partial<HevyGrantProps> } | null | undefined)
 		?.props;
 	const apiKey = isString(props?.hevyApiKey) ? props.hevyApiKey : null;
-	if (!apiKey) return oauthUnauthorizedResponse(request);
+	if (!apiKey) return oauthUnauthorizedResponse(resourceUrl);
 
 	let validation: HevyOAuthValidation;
 	try {
@@ -512,7 +527,7 @@ async function handleAuthorizedMcpRequest<Env>(
 	if (validation === "config-error") {
 		return jsonConfigErrorResponse();
 	}
-	if (validation === "invalid") return oauthUnauthorizedResponse(request);
+	if (validation === "invalid") return oauthUnauthorizedResponse(resourceUrl);
 	return dependencies.serveMcp(request, env, apiKey, deadline);
 }
 
@@ -537,7 +552,13 @@ export function createHevyOAuthProvider<Env extends object>(
 		apiRoute: MCP_PATH,
 		apiHandler: {
 			fetch: (request: Request, env: Env, ctx: ExecutionContext) =>
-				handleAuthorizedMcpRequest(request, env, ctx, dependencies),
+				handleAuthorizedMcpRequest(
+					request,
+					env,
+					ctx,
+					dependencies,
+					resourceUrl,
+				),
 		},
 		defaultHandler: {
 			fetch: async (request: Request, env: Env & OAuthProviderEnv) => {
@@ -569,7 +590,6 @@ export function createHevyOAuthProvider<Env extends object>(
 		accessTokenTTL: OAUTH_ACCESS_TOKEN_TTL_SECONDS,
 		refreshTokenTTL: OAUTH_REFRESH_TOKEN_TTL_SECONDS,
 		clientIdMetadataDocumentEnabled: true,
-		allowPlainPKCE: false,
 		resourceMetadata: {
 			resource_name: "Hevy MCP Server",
 			resource: resourceUrl,

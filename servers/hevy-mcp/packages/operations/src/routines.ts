@@ -1,14 +1,30 @@
+import { Effect, Option, Stream } from "effect";
+import { defineOperation } from "./define-operation.js";
 import type {
-	HevyClient,
 	HevyExecutionOptions,
 	HevyOperationSafety,
 } from "@hevy-mcp/hevy-client";
-import type { GetV1Routines200, Routine } from "@hevy-mcp/hevy-client/types";
+import type {
+	HevyRequestEffectClient,
+	HevyRequestEffectError,
+} from "@hevy-mcp/hevy-client/internal";
+import type {
+	GetV1Routines200,
+	PostV1Routines201,
+	PutV1RoutinesRoutineid200,
+	Routine,
+} from "@hevy-mcp/hevy-client/types";
 import {
-	canonicalEndpointIdentity,
-	expectedGet404Outcome,
-	isHevyHttpError,
-} from "@hevy-mcp/hevy-client";
+	buildRoutinePayload,
+	type RoutinePayloadInput,
+} from "./mutation-semantics.js";
+import {
+	assertPageEcho,
+	hasNextPage,
+	withExpectedEndOfList,
+	withExpectedNotFound,
+	PaginationMismatchError,
+} from "./operation-errors.js";
 
 export interface RoutinesListInput {
 	readonly page: number;
@@ -22,7 +38,7 @@ export interface RoutinesListOutput {
 	readonly expected404Outcome?: "end_of_list";
 }
 
-export type RoutinesListAdapter = Pick<HevyClient, "getRoutines">;
+export type RoutinesListAdapter = Pick<HevyRequestEffectClient, "getRoutines">;
 
 export interface RoutinesGetInput {
 	readonly routineId: string;
@@ -33,7 +49,129 @@ export interface RoutinesGetOutput {
 	readonly expected404Outcome?: "not_found";
 }
 
-export type RoutinesGetAdapter = Pick<HevyClient, "getRoutineById">;
+export type RoutinesGetAdapter = Pick<
+	HevyRequestEffectClient,
+	"getRoutineById"
+>;
+
+export type RoutinesCreateInput = {
+	readonly routine: RoutinePayloadInput;
+};
+
+export type RoutinesCreateAdapter = Pick<
+	HevyRequestEffectClient,
+	"createRoutine"
+>;
+
+export interface RoutinesCreateOutput {
+	readonly routine: Routine | undefined;
+	readonly usesRepRanges: boolean;
+}
+
+export interface RoutinesCreateDescriptor {
+	readonly id: "routines.create";
+	readonly safety: Extract<HevyOperationSafety, "non-idempotent-write">;
+}
+
+export const routinesCreateDescriptor: RoutinesCreateDescriptor = {
+	id: "routines.create",
+	safety: "non-idempotent-write",
+};
+
+export interface RoutinesCreateOperation {
+	readonly descriptor: RoutinesCreateDescriptor;
+	readonly effect: (
+		input: RoutinesCreateInput,
+		options?: HevyExecutionOptions,
+	) => Effect.Effect<RoutinesCreateOutput, HevyRequestEffectError>;
+	execute(
+		input: RoutinesCreateInput,
+		options?: HevyExecutionOptions,
+	): Promise<RoutinesCreateOutput>;
+}
+
+export type RoutinesUpdateInput =
+	| {
+			readonly routineId: string;
+			readonly routine: RoutinePayloadInput;
+	  }
+	| {
+			readonly routineId: string;
+			readonly patch: RoutinePayloadInput;
+	  };
+
+export type RoutinesUpdateAdapter = Pick<
+	HevyRequestEffectClient,
+	"updateRoutine"
+>;
+
+export interface RoutinesUpdateOutput {
+	readonly routine: Routine | undefined;
+	readonly usesRepRanges: boolean;
+}
+
+export interface RoutinesUpdateDescriptor {
+	readonly id: "routines.update";
+	readonly safety: Extract<HevyOperationSafety, "idempotent-write">;
+}
+
+export const routinesUpdateDescriptor: RoutinesUpdateDescriptor = {
+	id: "routines.update",
+	safety: "idempotent-write",
+};
+
+export interface RoutinesUpdateOperation {
+	readonly descriptor: RoutinesUpdateDescriptor;
+	readonly effect: (
+		input: RoutinesUpdateInput,
+		options?: HevyExecutionOptions,
+	) => Effect.Effect<RoutinesUpdateOutput, HevyRequestEffectError>;
+	execute(
+		input: RoutinesUpdateInput,
+		options?: HevyExecutionOptions,
+	): Promise<RoutinesUpdateOutput>;
+}
+
+export interface RoutinesSearchInput {
+	readonly query?: string;
+	readonly limit?: number;
+}
+
+export type RoutinesSearchAdapter = Pick<
+	HevyRequestEffectClient,
+	"getRoutines"
+>;
+
+export interface RoutinesSearchOutput {
+	readonly routines: Routine[];
+	readonly pages: number;
+	readonly itemsScanned: number;
+}
+
+export interface RoutinesSearchDescriptor {
+	readonly id: "routines.search";
+	readonly safety: Extract<HevyOperationSafety, "read">;
+}
+
+export const routinesSearchDescriptor: RoutinesSearchDescriptor = {
+	id: "routines.search",
+	safety: "read",
+};
+
+export interface RoutinesSearchOperation {
+	readonly descriptor: RoutinesSearchDescriptor;
+	readonly effect: (
+		input: RoutinesSearchInput,
+		options?: HevyExecutionOptions,
+	) => Effect.Effect<
+		RoutinesSearchOutput,
+		HevyRequestEffectError | PaginationMismatchError
+	>;
+	execute(
+		input: RoutinesSearchInput,
+		options?: HevyExecutionOptions,
+	): Promise<RoutinesSearchOutput>;
+}
 
 export interface RoutinesGetDescriptor {
 	readonly id: "routines.get";
@@ -47,6 +185,10 @@ export const routinesGetDescriptor: RoutinesGetDescriptor = {
 
 export interface RoutinesGetOperation {
 	readonly descriptor: RoutinesGetDescriptor;
+	readonly effect: (
+		input: RoutinesGetInput,
+		options?: HevyExecutionOptions,
+	) => Effect.Effect<RoutinesGetOutput, HevyRequestEffectError>;
 	execute(
 		input: RoutinesGetInput,
 		options?: HevyExecutionOptions,
@@ -65,107 +207,192 @@ export const routinesListDescriptor: RoutinesListDescriptor = {
 
 export interface RoutinesListOperation {
 	readonly descriptor: RoutinesListDescriptor;
+	readonly effect: (
+		input: RoutinesListInput,
+		options?: HevyExecutionOptions,
+	) => Effect.Effect<
+		RoutinesListOutput,
+		HevyRequestEffectError | PaginationMismatchError
+	>;
 	execute(
 		input: RoutinesListInput,
 		options?: HevyExecutionOptions,
 	): Promise<RoutinesListOutput>;
 }
 
-type ErrorInput = Error | string;
+const DEFAULT_ROUTINE_SEARCH_LIMIT = 20;
+const MAX_ROUTINE_SEARCH_LIMIT = 100;
+const ROUTINE_SEARCH_PAGE_SIZE = 10;
 
-function isExpectedEndOfList(error: ErrorInput, page: number): boolean {
-	return (
-		page > 1 &&
-		isHevyHttpError(error) &&
-		canonicalEndpointIdentity(error.endpoint) === "/v1/routines" &&
-		expectedGet404Outcome(error.endpoint, error.method, error.status, page) ===
-			"end_of_list"
+function normalizeRoutineResponse(
+	response: PostV1Routines201 | PutV1RoutinesRoutineid200,
+): Routine | undefined {
+	return "routine" in response ? response.routine : undefined;
+}
+
+export function createRoutinesCreateOperation(
+	adapter: RoutinesCreateAdapter,
+): RoutinesCreateOperation {
+	return defineOperation(
+		routinesCreateDescriptor,
+		function* (input: RoutinesCreateInput, options?: HevyExecutionOptions) {
+			const { payload, usesRepRanges } = buildRoutinePayload(
+				input.routine,
+				"create",
+			);
+			const request = adapter.createRoutine({ routine: payload }, options);
+			const response = yield* request;
+			return {
+				routine: normalizeRoutineResponse(response),
+				usesRepRanges,
+			};
+		},
 	);
 }
 
-function normalizeRoutinesPage(
-	response: GetV1Routines200,
-	input: RoutinesListInput,
-): RoutinesListOutput {
-	if (response.page !== undefined && response.page !== input.page) {
-		throw new Error(
-			`Routines page mismatch: requested page ${input.page} but received page ${response.page}`,
-		);
-	}
-	return {
-		items: response.routines ?? [],
-		page: response.page ?? input.page,
-		pageCount: response.page_count,
-	};
+export function createRoutinesUpdateOperation(
+	adapter: RoutinesUpdateAdapter,
+): RoutinesUpdateOperation {
+	return defineOperation(
+		routinesUpdateDescriptor,
+		function* (input: RoutinesUpdateInput, options?: HevyExecutionOptions) {
+			const { payload, usesRepRanges } = buildRoutinePayload(
+				"routine" in input ? input.routine : input.patch,
+				"update",
+			);
+			const request = adapter.updateRoutine(
+				input.routineId,
+				{ routine: payload },
+				options,
+			);
+			const response = yield* request;
+			return {
+				routine: normalizeRoutineResponse(response),
+				usesRepRanges,
+			};
+		},
+	);
 }
 
-function isExpectedRoutineNotFound(error: ErrorInput): boolean {
-	return (
-		isHevyHttpError(error) &&
-		canonicalEndpointIdentity(error.endpoint) === "/v1/routines/:routineId" &&
-		expectedGet404Outcome(error.endpoint, error.method, error.status) ===
-			"not_found"
+type RoutinesSearchCursor = {
+	readonly page: number;
+	readonly matches: number;
+};
+
+type RoutinesSearchPage = {
+	readonly matches: Routine[];
+	readonly scanned: number;
+};
+
+export function createRoutinesSearchOperation(
+	adapter: RoutinesSearchAdapter,
+): RoutinesSearchOperation {
+	return defineOperation(
+		routinesSearchDescriptor,
+		function* (input: RoutinesSearchInput, options?: HevyExecutionOptions) {
+			const normalizedQuery = input.query?.toLowerCase();
+			const limit = Math.min(
+				Math.max(input.limit ?? DEFAULT_ROUTINE_SEARCH_LIMIT, 0),
+				MAX_ROUTINE_SEARCH_LIMIT,
+			);
+			const pageStream = Stream.paginate<
+				RoutinesSearchCursor,
+				RoutinesSearchPage,
+				HevyRequestEffectError | PaginationMismatchError
+			>({ page: 1, matches: 0 }, (cursor) => {
+				if (limit === 0) {
+					return Effect.succeed([[], Option.none()]);
+				}
+				const params = {
+					page: cursor.page,
+					pageSize: ROUTINE_SEARCH_PAGE_SIZE,
+				};
+				const request = adapter.getRoutines(params, options);
+				return request.pipe(
+					Effect.tap((response) =>
+						assertPageEcho(response, cursor.page, "routines"),
+					),
+					Effect.map((response: GetV1Routines200) => {
+						const routines = response.routines ?? [];
+						const pageMatches = routines.filter((routine) =>
+							normalizedQuery === undefined
+								? true
+								: (routine.title?.toLowerCase().includes(normalizedQuery) ??
+									false),
+						);
+						const matches = cursor.matches + pageMatches.length;
+						const continuePaging =
+							matches < limit &&
+							hasNextPage(response.page_count, cursor.page, routines.length);
+						return [
+							[{ matches: pageMatches, scanned: routines.length }],
+							continuePaging
+								? Option.some({
+										page: cursor.page + 1,
+										matches,
+									})
+								: Option.none(),
+						] as const;
+					}),
+					withExpectedEndOfList("/v1/routines", cursor.page, [
+						[],
+						Option.none<RoutinesSearchCursor>(),
+					] as const),
+				);
+			});
+			const pages = yield* Stream.runCollect(pageStream);
+			const matches = pages.flatMap((page) => page.matches);
+			return {
+				routines: matches.slice(0, limit),
+				pages: pages.length,
+				itemsScanned: pages.reduce((total, page) => total + page.scanned, 0),
+			};
+		},
 	);
 }
 
 export function createRoutinesGetOperation(
 	adapter: RoutinesGetAdapter,
 ): RoutinesGetOperation {
-	return {
-		descriptor: routinesGetDescriptor,
-		async execute(input, options) {
-			try {
-				const response =
-					options === undefined
-						? await adapter.getRoutineById(input.routineId)
-						: await adapter.getRoutineById(input.routineId, options);
-				return { routine: response.routine ?? null };
-			} catch (error) {
-				if (
-					isExpectedRoutineNotFound(
-						error instanceof Error ? error : String(error),
-					)
-				) {
-					return {
-						routine: null,
-						expected404Outcome: "not_found",
-					};
-				}
-				throw error;
-			}
+	return defineOperation(
+		routinesGetDescriptor,
+		function* (input: RoutinesGetInput, options?: HevyExecutionOptions) {
+			const request = adapter.getRoutineById(input.routineId, options);
+			return yield* request.pipe(
+				Effect.map((response) => ({ routine: response?.routine ?? null })),
+				withExpectedNotFound("/v1/routines", {
+					routine: null,
+					expected404Outcome: "not_found" as const,
+				}),
+			);
 		},
-	};
+	);
 }
 
 export function createRoutinesListOperation(
 	adapter: RoutinesListAdapter,
 ): RoutinesListOperation {
-	return {
-		descriptor: routinesListDescriptor,
-		async execute(input, options) {
-			try {
-				const params = { page: input.page, pageSize: input.pageSize };
-				const response =
-					options === undefined
-						? await adapter.getRoutines(params)
-						: await adapter.getRoutines(params, options);
-				return normalizeRoutinesPage(response, input);
-			} catch (error) {
-				if (
-					isExpectedEndOfList(
-						error instanceof Error ? error : String(error),
-						input.page,
-					)
-				) {
-					return {
-						items: [],
-						page: input.page,
-						pageCount: undefined,
-						expected404Outcome: "end_of_list",
-					};
-				}
-				throw error;
-			}
+	return defineOperation(
+		routinesListDescriptor,
+		function* (input: RoutinesListInput, options?: HevyExecutionOptions) {
+			const params = { page: input.page, pageSize: input.pageSize };
+			const request = adapter.getRoutines(params, options);
+			return yield* request.pipe(
+				Effect.tap((response) =>
+					assertPageEcho(response, input.page, "routines"),
+				),
+				Effect.map((response: GetV1Routines200) => ({
+					items: response.routines ?? [],
+					page: response.page ?? input.page,
+					pageCount: response.page_count,
+				})),
+				withExpectedEndOfList("/v1/routines", input.page, {
+					items: [],
+					page: input.page,
+					pageCount: undefined,
+					expected404Outcome: "end_of_list" as const,
+				}),
+			);
 		},
-	};
+	);
 }

@@ -2,7 +2,16 @@ import type {
 	AuthRequest,
 	OAuthHelpers,
 } from "@cloudflare/workers-oauth-provider";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import { z } from "zod";
 import { HevyHttpError } from "@hevy-mcp/hevy-client";
 import type { HevyClient } from "@hevy-mcp/hevy-client";
@@ -17,10 +26,25 @@ import {
 } from "./worker-oauth.js";
 import { createWorkerFetchHandler } from "./worker.js";
 import { resetMemoryValidationCacheForTests } from "./validation-cache.js";
+import {
+	initializeMessage,
+	jsonPostRequest,
+	parseMcpResponse,
+} from "./test-fixtures/mcp.js";
+
+// Bare origin: with no OAUTH_RESOURCE binding the Worker advertises its own
+// request origin, which is what Claude's client sends as `resource`.
+const OAUTH_RESOURCE = "https://worker.example";
+const MCP_URL = `${OAUTH_RESOURCE}/mcp`;
 
 class TestExecutionSpan implements Span {
 	get isTraced(): boolean {
 		return false;
+	}
+
+	/** Workers `Span` requires a span context; the test span stays inert. */
+	spanContext(): TracingSpanContext {
+		return { traceId: "", spanId: "", traceFlags: 0 };
 	}
 
 	setAttribute(_key: string, _value: boolean | number | string): this {
@@ -33,38 +57,70 @@ class TestExecutionSpan implements Span {
 		return this;
 	}
 
+	recordException(_exception: Parameters<Span["recordException"]>[0]): void {}
+
+	updateName(_name: string): this {
+		return this;
+	}
+
+	setStatus(_status: TracingSpanStatus): this {
+		return this;
+	}
+
 	end(): void {}
 }
 
-const testExecutionContext = {
-	waitUntil(_promise: Promise<unknown>): void {},
-	passThroughOnException(): void {},
-	abort(_reason?: string): void {},
-	exports: {},
-	props: {},
-	tracing: {
-		enterSpan<T, A extends unknown[]>(
-			_name: string,
-			callback: (span: Span, ...args: A) => T,
-			...args: A
-		): T {
-			return callback(new TestExecutionSpan(), ...args);
+function createTestExecutionContext() {
+	return {
+		waitUntil(_promise: Promise<unknown>): void {},
+		passThroughOnException(): void {},
+		abort(_reason?: string): void {},
+		exports: {},
+		props: {},
+		tracing: {
+			enterSpan<T, A extends unknown[]>(
+				_name: string,
+				callback: (span: Span, ...args: A) => T,
+				...args: A
+			): T {
+				return callback(new TestExecutionSpan(), ...args);
+			},
+			startActiveSpan<T, A extends unknown[]>(
+				_name: string,
+				callback: (span: Span, ...args: A) => T,
+				...args: A
+			): T {
+				return callback(new TestExecutionSpan(), ...args);
+			},
+			startSpan(_name: string): Span {
+				return new TestExecutionSpan();
+			},
+			getActiveSpan(): Span | undefined {
+				return undefined;
+			},
+			Span: TestExecutionSpan,
 		},
-		startActiveSpan<T, A extends unknown[]>(
-			_name: string,
-			callback: (span: Span, ...args: A) => T,
-			...args: A
-		): T {
-			return callback(new TestExecutionSpan(), ...args);
-		},
-		startSpan(_name: string): Span {
-			return new TestExecutionSpan();
-		},
-		Span: TestExecutionSpan,
-	},
-} satisfies ExecutionContext;
+	} satisfies ExecutionContext;
+}
+
+let testExecutionContext = createTestExecutionContext();
+
+const originalRetryDelays = process.env.HEVY_VALIDATION_RETRY_DELAYS_MS;
+
+beforeAll(() => {
+	process.env.HEVY_VALIDATION_RETRY_DELAYS_MS = "1,2";
+});
+
+afterAll(() => {
+	if (originalRetryDelays === undefined) {
+		delete process.env.HEVY_VALIDATION_RETRY_DELAYS_MS;
+	} else {
+		process.env.HEVY_VALIDATION_RETRY_DELAYS_MS = originalRetryDelays;
+	}
+});
 
 beforeEach(() => {
+	testExecutionContext = createTestExecutionContext();
 	vi.stubGlobal("Cloudflare", {
 		compatibilityFlags: { global_fetch_strictly_public: true },
 	});
@@ -99,6 +155,7 @@ const sampleAuthRequest: AuthRequest = {
 	redirectUri: "https://claude.ai/api/mcp/auth_callback",
 	scope: [],
 	state: "state-xyz",
+	resource: OAUTH_RESOURCE,
 	codeChallenge: "challenge",
 	codeChallengeMethod: "S256",
 };
@@ -135,6 +192,20 @@ function createDependencies(
 	};
 }
 
+function tokenPostRequest(fields: Record<string, string>): Request {
+	return new Request("https://worker.example/token", {
+		method: "POST",
+		body: new URLSearchParams(fields),
+	});
+}
+
+function registerRequest(
+	body: Parameters<typeof jsonPostRequest>[0],
+	headers: RequestInit["headers"] = { "content-type": "application/json" },
+): Request {
+	return jsonPostRequest(body, headers, "https://worker.example/register");
+}
+
 function authorizePostRequest(
 	fields: Record<string, string>,
 	signal?: AbortSignal,
@@ -144,6 +215,16 @@ function authorizePostRequest(
 		body: new URLSearchParams(fields),
 		signal,
 	});
+}
+
+function authorizeWithApiKey(apiKey: string, signal?: AbortSignal): Request {
+	return authorizePostRequest(
+		{
+			oauth_request: encodeAuthRequest(sampleAuthRequest),
+			hevy_api_key: apiKey,
+		},
+		signal,
+	);
 }
 
 describe("OAuth helpers", () => {
@@ -173,6 +254,15 @@ describe("OAuth helpers", () => {
 				JSON.stringify({
 					...sampleAuthRequest,
 					scope: [42],
+				}),
+			),
+		],
+		[
+			"array resource",
+			btoa(
+				JSON.stringify({
+					...sampleAuthRequest,
+					resource: [OAUTH_RESOURCE],
 				}),
 			),
 		],
@@ -255,10 +345,7 @@ describe("authorize endpoint", () => {
 	it("returns a safe 502 when completing authorization fails", async () => {
 		const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const result = await handleAuthorizePost(
-			authorizePostRequest({
-				oauth_request: encodeAuthRequest(sampleAuthRequest),
-				hevy_api_key: "some-key",
-			}),
+			authorizeWithApiKey("some-key"),
 			testExecutionContext,
 			createFakeHelpers({
 				completeAuthorization: vi
@@ -294,10 +381,7 @@ describe("authorize endpoint", () => {
 		});
 		const validateApiKey = vi.fn().mockResolvedValue("valid");
 		const result = await handleAuthorizePost(
-			authorizePostRequest({
-				oauth_request: encodeAuthRequest(sampleAuthRequest),
-				hevy_api_key: " secret-key ",
-			}),
+			authorizeWithApiKey(" secret-key "),
 			testExecutionContext,
 			createFakeHelpers({ completeAuthorization }),
 			createDependencies({ validateApiKey }),
@@ -323,10 +407,7 @@ describe("authorize endpoint", () => {
 	it("re-renders the form when Hevy rejects the API key", async () => {
 		const completeAuthorization = vi.fn();
 		const result = await handleAuthorizePost(
-			authorizePostRequest({
-				oauth_request: encodeAuthRequest(sampleAuthRequest),
-				hevy_api_key: "bad-key",
-			}),
+			authorizeWithApiKey("bad-key"),
 			testExecutionContext,
 			createFakeHelpers({ completeAuthorization }),
 			createDependencies({
@@ -340,10 +421,7 @@ describe("authorize endpoint", () => {
 
 	it("re-renders the form when Hevy validation is unavailable", async () => {
 		const result = await handleAuthorizePost(
-			authorizePostRequest({
-				oauth_request: encodeAuthRequest(sampleAuthRequest),
-				hevy_api_key: "some-key",
-			}),
+			authorizeWithApiKey("some-key"),
 			testExecutionContext,
 			createFakeHelpers(),
 			createDependencies({
@@ -360,10 +438,7 @@ describe("authorize endpoint", () => {
 
 	it("re-renders the form when OAuth validation has a configuration error", async () => {
 		const result = await handleAuthorizePost(
-			authorizePostRequest({
-				oauth_request: encodeAuthRequest(sampleAuthRequest),
-				hevy_api_key: "some-key",
-			}),
+			authorizeWithApiKey("some-key"),
 			testExecutionContext,
 			createFakeHelpers(),
 			createDependencies({
@@ -394,10 +469,7 @@ describe("authorize endpoint", () => {
 	it("requires an API key before contacting Hevy", async () => {
 		const validateApiKey = vi.fn().mockResolvedValue("valid");
 		const result = await handleAuthorizePost(
-			authorizePostRequest({
-				oauth_request: encodeAuthRequest(sampleAuthRequest),
-				hevy_api_key: "   ",
-			}),
+			authorizeWithApiKey("   "),
 			testExecutionContext,
 			createFakeHelpers(),
 			createDependencies({ validateApiKey }),
@@ -419,13 +491,7 @@ describe("authorize endpoint", () => {
 				}),
 		);
 		const pending = handleAuthorizePost(
-			authorizePostRequest(
-				{
-					oauth_request: encodeAuthRequest(sampleAuthRequest),
-					hevy_api_key: "some-key",
-				},
-				controller.signal,
-			),
+			authorizeWithApiKey("some-key", controller.signal),
 			testExecutionContext,
 			createFakeHelpers(),
 			createDependencies({ validateApiKey }),
@@ -440,10 +506,7 @@ describe("authorize endpoint", () => {
 
 	it("preserves an OAuth validation deadline outcome", async () => {
 		const pending = handleAuthorizePost(
-			authorizePostRequest({
-				oauth_request: encodeAuthRequest(sampleAuthRequest),
-				hevy_api_key: "some-key",
-			}),
+			authorizeWithApiKey("some-key"),
 			testExecutionContext,
 			createFakeHelpers(),
 			createDependencies({
@@ -518,29 +581,21 @@ function base64UrlEncode(bytes: Uint8Array): string {
 		.replace(/=+$/, "");
 }
 
-const initializeBody = {
-	jsonrpc: "2.0",
-	id: 1,
-	method: "initialize",
-	params: {
-		protocolVersion: "2025-11-25",
-		capabilities: {},
-		clientInfo: { name: "oauth-test", version: "1" },
-	},
-};
-
-async function parseMcpResponse(response: Response): Promise<unknown> {
-	const text = await response.text();
-	if (response.headers.get("content-type")?.includes("text/event-stream")) {
-		const data = text
-			.split("\n")
-			.find((line) => line.startsWith("data: "))
-			?.slice(6);
-		if (!data) throw new Error(`Missing SSE data: ${text}`);
-		return JSON.parse(data);
-	}
-	return JSON.parse(text);
+async function createPkcePair() {
+	const verifier = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
+	const challenge = base64UrlEncode(
+		new Uint8Array(
+			await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
+		),
+	);
+	return { verifier, challenge };
 }
+
+const initializeBody = initializeMessage(1, "oauth-test");
+const mcpHeaders = {
+	accept: "application/json, text/event-stream",
+	"content-type": "application/json",
+};
 
 describe("OAuth-enabled Worker fetch handler", () => {
 	const redirectUri = "https://claude.ai/api/mcp/auth_callback";
@@ -553,8 +608,69 @@ describe("OAuth-enabled Worker fetch handler", () => {
 			createRequestClient: () => createMockClient(),
 			...dependencies,
 		});
-		const env = { OAUTH_KV: createMemoryKV() };
+		const env = {
+			OAUTH_KV: createMemoryKV(),
+			OAUTH_RESOURCE: undefined as string | undefined,
+		};
 		return { handler, env };
+	}
+
+	async function issueAccessTokenForValidationTest(
+		handler: ReturnType<typeof createHandlerWithEnv>["handler"],
+		env: ReturnType<typeof createHandlerWithEnv>["env"],
+		apiKey: string,
+	) {
+		const registration = await handler(
+			registerRequest({
+				redirect_uris: [redirectUri],
+				token_endpoint_auth_method: "none",
+			}),
+			env,
+			testExecutionContext,
+		);
+		const client = (await registration.json()) as { client_id: string };
+		const { verifier, challenge } = await createPkcePair();
+		const authorizeUrl = new URL("https://worker.example/authorize");
+		authorizeUrl.searchParams.set("response_type", "code");
+		authorizeUrl.searchParams.set("client_id", client.client_id);
+		authorizeUrl.searchParams.set("redirect_uri", redirectUri);
+		authorizeUrl.searchParams.set("state", "s");
+		authorizeUrl.searchParams.set("code_challenge", challenge);
+		authorizeUrl.searchParams.set("code_challenge_method", "S256");
+		const consentHtml = await (
+			await handler(new Request(authorizeUrl), env, testExecutionContext)
+		).text();
+		const encodedRequest = /name="oauth_request" value="([^"]+)"/.exec(
+			consentHtml,
+		)?.[1] as string;
+		const approval = await handler(
+			new Request("https://worker.example/authorize", {
+				method: "POST",
+				body: new URLSearchParams({
+					oauth_request: encodedRequest,
+					hevy_api_key: apiKey,
+				}),
+			}),
+			env,
+			testExecutionContext,
+		);
+		const code = new URL(
+			approval.headers.get("location") as string,
+		).searchParams.get("code") as string;
+		const tokens = (await (
+			await handler(
+				tokenPostRequest({
+					grant_type: "authorization_code",
+					code,
+					redirect_uri: redirectUri,
+					client_id: client.client_id,
+					code_verifier: verifier,
+				}),
+				env,
+				testExecutionContext,
+			)
+		).json()) as { access_token: string };
+		return tokens;
 	}
 
 	it("serves OAuth discovery metadata when OAUTH_KV is bound", async () => {
@@ -578,14 +694,45 @@ describe("OAuth-enabled Worker fetch handler", () => {
 
 		const resource = await handler(
 			new Request(
-				"https://worker.example/.well-known/oauth-protected-resource/mcp",
+				"https://worker.example/.well-known/oauth-protected-resource",
 			),
 			env,
 			testExecutionContext,
 		);
 		expect(resource.status).toBe(200);
-		const resourceMetadata = (await resource.json()) as Record<string, unknown>;
-		expect(resourceMetadata.resource).toBe("https://worker.example");
+		expect(await resource.json()).toMatchObject({
+			resource: OAUTH_RESOURCE,
+		});
+	});
+
+	it("uses the configured OAuth resource for metadata and challenges", async () => {
+		const resource = "https://mcp.fork.example/mcp";
+		const { handler, env } = createHandlerWithEnv();
+		env.OAUTH_RESOURCE = resource;
+
+		const metadata = await handler(
+			new Request(
+				"https://mcp.fork.example/.well-known/oauth-protected-resource/mcp",
+			),
+			env,
+			testExecutionContext,
+		);
+		expect(metadata.status).toBe(200);
+		expect(await metadata.json()).toMatchObject({ resource });
+
+		const challenge = await handler(
+			new Request(resource, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: "{}",
+			}),
+			env,
+			testExecutionContext,
+		);
+		expect(challenge.status).toBe(401);
+		expect(challenge.headers.get("www-authenticate")).toContain(
+			'resource_metadata="https://mcp.fork.example/.well-known/oauth-protected-resource/mcp"',
+		);
 	});
 
 	it("keeps discovery paths returning 404 without OAUTH_KV", async () => {
@@ -615,14 +762,9 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		expect(discovery.status).toBe(404);
 
 		const legacy = await handler(
-			new Request("https://worker.example/mcp", {
-				method: "POST",
-				headers: {
-					accept: "application/json, text/event-stream",
-					"content-type": "application/json",
-					authorization: "Bearer raw-hevy-api-key",
-				},
-				body: JSON.stringify(initializeBody),
+			jsonPostRequest(initializeBody, {
+				...mcpHeaders,
+				authorization: "Bearer raw-hevy-api-key",
 			}),
 			env,
 			testExecutionContext,
@@ -637,7 +779,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 	it("challenges unauthenticated /mcp requests with resource metadata", async () => {
 		const { handler, env } = createHandlerWithEnv();
 		const result = await handler(
-			new Request("https://worker.example/mcp", {
+			new Request(MCP_URL, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: "{}",
@@ -647,7 +789,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		);
 		expect(result.status).toBe(401);
 		expect(result.headers.get("www-authenticate")).toContain(
-			'resource_metadata="https://worker.example/.well-known/oauth-protected-resource/mcp"',
+			'resource_metadata="https://worker.example/.well-known/oauth-protected-resource"',
 		);
 	});
 
@@ -657,14 +799,9 @@ describe("OAuth-enabled Worker fetch handler", () => {
 			createValidationClient,
 		});
 		const result = await handler(
-			new Request("https://worker.example/mcp", {
-				method: "POST",
-				headers: {
-					accept: "application/json, text/event-stream",
-					"content-type": "application/json",
-					authorization: "Bearer raw-hevy-api-key",
-				},
-				body: JSON.stringify(initializeBody),
+			jsonPostRequest(initializeBody, {
+				...mcpHeaders,
+				authorization: "Bearer raw-hevy-api-key",
 			}),
 			env,
 			testExecutionContext,
@@ -687,20 +824,20 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		);
 
 		const get = await handler(
-			new Request("https://worker.example/mcp", { method: "GET" }),
+			new Request(MCP_URL, { method: "GET" }),
 			env,
 			testExecutionContext,
 		);
 		expect(get.status).toBe(401);
 		expect(get.headers.get("www-authenticate")).toContain(
-			'resource_metadata="https://worker.example/.well-known/oauth-protected-resource/mcp"',
+			'resource_metadata="https://worker.example/.well-known/oauth-protected-resource"',
 		);
 	});
 
 	it("allows browser origins to reach the OAuth provider", async () => {
 		const { handler, env } = createHandlerWithEnv();
 		const result = await handler(
-			new Request("https://worker.example/mcp", {
+			new Request(MCP_URL, {
 				method: "POST",
 				headers: {
 					origin: "https://claude.ai",
@@ -720,20 +857,19 @@ describe("OAuth-enabled Worker fetch handler", () => {
 	it("registers a ChatGPT browser client from its web origin", async () => {
 		const { handler, env } = createHandlerWithEnv();
 		const result = await handler(
-			new Request("https://worker.example/register", {
-				method: "POST",
-				headers: {
-					"content-type": "application/json",
-					origin: "https://chatgpt.com",
-				},
-				body: JSON.stringify({
+			registerRequest(
+				{
 					client_name: "ChatGPT",
 					redirect_uris: [
 						"https://chatgpt.com/connector_platform_oauth_redirect",
 					],
 					token_endpoint_auth_method: "none",
-				}),
-			}),
+				},
+				{
+					"content-type": "application/json",
+					origin: "https://chatgpt.com",
+				},
+			),
 			env,
 			testExecutionContext,
 		);
@@ -752,20 +888,19 @@ describe("OAuth-enabled Worker fetch handler", () => {
 	it("registers a ChatGPT legacy browser client from its web origin", async () => {
 		const { handler, env } = createHandlerWithEnv();
 		const result = await handler(
-			new Request("https://worker.example/register", {
-				method: "POST",
-				headers: {
-					"content-type": "application/json",
-					origin: "https://chat.openai.com",
-				},
-				body: JSON.stringify({
+			registerRequest(
+				{
 					client_name: "ChatGPT",
 					redirect_uris: [
 						"https://chatgpt.com/connector_platform_oauth_redirect",
 					],
 					token_endpoint_auth_method: "none",
-				}),
-			}),
+				},
+				{
+					"content-type": "application/json",
+					origin: "https://chat.openai.com",
+				},
+			),
 			env,
 			testExecutionContext,
 		);
@@ -779,17 +914,16 @@ describe("OAuth-enabled Worker fetch handler", () => {
 	it("rejects unconfigured OAuth browser origins", async () => {
 		const { handler, env } = createHandlerWithEnv();
 		const result = await handler(
-			new Request("https://worker.example/register", {
-				method: "POST",
-				headers: {
+			registerRequest(
+				{
+					client_name: "Untrusted client",
+					redirect_uris: ["https://browser.example/callback"],
+				},
+				{
 					"content-type": "application/json",
 					origin: "https://browser.example",
 				},
-				body: JSON.stringify({
-					client_name: "Untrusted client",
-					redirect_uris: ["https://browser.example/callback"],
-				}),
-			}),
+			),
 			env,
 			testExecutionContext,
 		);
@@ -804,14 +938,10 @@ describe("OAuth-enabled Worker fetch handler", () => {
 
 		// 1. Dynamic client registration (RFC 7591), as Claude.ai performs it.
 		const registration = await handler(
-			new Request("https://worker.example/register", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({
-					client_name: "Claude",
-					redirect_uris: [redirectUri],
-					token_endpoint_auth_method: "none",
-				}),
+			registerRequest({
+				client_name: "Claude",
+				redirect_uris: [redirectUri],
+				token_endpoint_auth_method: "none",
 			}),
 			env,
 			testExecutionContext,
@@ -821,17 +951,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		expect(client.client_id).toBeTruthy();
 
 		// 2. Authorization request renders the consent form.
-		const verifier = base64UrlEncode(
-			crypto.getRandomValues(new Uint8Array(32)),
-		);
-		const challenge = base64UrlEncode(
-			new Uint8Array(
-				await crypto.subtle.digest(
-					"SHA-256",
-					new TextEncoder().encode(verifier),
-				),
-			),
-		);
+		const { verifier, challenge } = await createPkcePair();
 		const authorizeUrl = new URL("https://worker.example/authorize");
 		authorizeUrl.searchParams.set("response_type", "code");
 		authorizeUrl.searchParams.set("client_id", client.client_id);
@@ -874,16 +994,12 @@ describe("OAuth-enabled Worker fetch handler", () => {
 
 		// 4. Authorization code + PKCE verifier exchange for tokens.
 		const tokenResult = await handler(
-			new Request("https://worker.example/token", {
-				method: "POST",
-				body: new URLSearchParams({
-					grant_type: "authorization_code",
-					code: code as string,
-					redirect_uri: redirectUri,
-					client_id: client.client_id,
-					code_verifier: verifier,
-					resource: "https://worker.example",
-				}),
+			tokenPostRequest({
+				grant_type: "authorization_code",
+				code: code as string,
+				redirect_uri: redirectUri,
+				client_id: client.client_id,
+				code_verifier: verifier,
 			}),
 			env,
 			testExecutionContext,
@@ -912,15 +1028,14 @@ describe("OAuth-enabled Worker fetch handler", () => {
 			},
 		});
 		const mcpResult = await mcpHandler(
-			new Request("https://worker.example/mcp", {
-				method: "POST",
-				headers: {
-					accept: "application/json, text/event-stream",
-					"content-type": "application/json",
+			jsonPostRequest(
+				initializeBody,
+				{
+					...mcpHeaders,
 					authorization: `Bearer ${tokens.access_token}`,
 				},
-				body: JSON.stringify(initializeBody),
-			}),
+				MCP_URL,
+			),
 			env,
 			testExecutionContext,
 		);
@@ -931,14 +1046,10 @@ describe("OAuth-enabled Worker fetch handler", () => {
 
 		// 6. The refresh-token grant issues a new working access token.
 		const refreshResult = await handler(
-			new Request("https://worker.example/token", {
-				method: "POST",
-				body: new URLSearchParams({
-					grant_type: "refresh_token",
-					refresh_token: tokens.refresh_token as string,
-					client_id: client.client_id,
-					resource: "https://worker.example",
-				}),
+			tokenPostRequest({
+				grant_type: "refresh_token",
+				refresh_token: tokens.refresh_token as string,
+				client_id: client.client_id,
 			}),
 			env,
 			testExecutionContext,
@@ -948,15 +1059,14 @@ describe("OAuth-enabled Worker fetch handler", () => {
 			access_token: string;
 		};
 		const refreshedMcpResult = await mcpHandler(
-			new Request("https://worker.example/mcp", {
-				method: "POST",
-				headers: {
-					accept: "application/json, text/event-stream",
-					"content-type": "application/json",
+			jsonPostRequest(
+				initializeBody,
+				{
+					...mcpHeaders,
 					authorization: `Bearer ${refreshed.access_token}`,
 				},
-				body: JSON.stringify(initializeBody),
-			}),
+				MCP_URL,
+			),
 			env,
 			testExecutionContext,
 		);
@@ -968,14 +1078,14 @@ describe("OAuth-enabled Worker fetch handler", () => {
 
 		// 7. A bogus OAuth-shaped token is rejected with a challenge.
 		const rejected = await mcpHandler(
-			new Request("https://worker.example/mcp", {
-				method: "POST",
-				headers: {
+			jsonPostRequest(
+				initializeBody,
+				{
 					"content-type": "application/json",
 					authorization: "Bearer forged:token:value",
 				},
-				body: JSON.stringify(initializeBody),
-			}),
+				MCP_URL,
+			),
 			env,
 			testExecutionContext,
 		);
@@ -1002,17 +1112,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		);
 		vi.stubGlobal("fetch", fetchMock);
 		const { handler, env } = createHandlerWithEnv();
-		const verifier = base64UrlEncode(
-			crypto.getRandomValues(new Uint8Array(32)),
-		);
-		const challenge = base64UrlEncode(
-			new Uint8Array(
-				await crypto.subtle.digest(
-					"SHA-256",
-					new TextEncoder().encode(verifier),
-				),
-			),
-		);
+		const { challenge } = await createPkcePair();
 		const authorizeUrl = new URL("https://worker.example/authorize");
 		authorizeUrl.searchParams.set("response_type", "code");
 		authorizeUrl.searchParams.set("client_id", clientId);
@@ -1021,7 +1121,7 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		authorizeUrl.searchParams.set("code_challenge_method", "S256");
 		authorizeUrl.searchParams.set("state", "claude-state");
 		authorizeUrl.searchParams.set("scope", "mcp");
-		authorizeUrl.searchParams.set("resource", "https://worker.example");
+		authorizeUrl.searchParams.set("resource", OAUTH_RESOURCE);
 
 		const result = await handler(
 			new Request(authorizeUrl),
@@ -1059,18 +1159,8 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		vi.stubGlobal("fetch", fetchMock);
 		const { handler, env } = createHandlerWithEnv();
 
-		const verifier = base64UrlEncode(
-			crypto.getRandomValues(new Uint8Array(32)),
-		);
-		const challenge = base64UrlEncode(
-			new Uint8Array(
-				await crypto.subtle.digest(
-					"SHA-256",
-					new TextEncoder().encode(verifier),
-				),
-			),
-		);
-		const resource = "https://worker.example";
+		const { verifier, challenge } = await createPkcePair();
+		const resource = OAUTH_RESOURCE;
 		const authorizeUrl = new URL("https://worker.example/authorize");
 		authorizeUrl.searchParams.set("response_type", "code");
 		authorizeUrl.searchParams.set("client_id", clientId);
@@ -1113,16 +1203,13 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		expect(code).toBeTruthy();
 
 		const tokenResult = await handler(
-			new Request("https://worker.example/token", {
-				method: "POST",
-				body: new URLSearchParams({
-					grant_type: "authorization_code",
-					code: code as string,
-					redirect_uri: cimdRedirectUri,
-					client_id: clientId,
-					code_verifier: verifier,
-					resource,
-				}),
+			tokenPostRequest({
+				grant_type: "authorization_code",
+				code: code as string,
+				redirect_uri: cimdRedirectUri,
+				client_id: clientId,
+				code_verifier: verifier,
+				resource,
 			}),
 			env,
 			testExecutionContext,
@@ -1146,15 +1233,14 @@ describe("OAuth-enabled Worker fetch handler", () => {
 			},
 		});
 		const mcpResult = await mcpHandler(
-			new Request("https://worker.example/mcp", {
-				method: "POST",
-				headers: {
-					accept: "application/json, text/event-stream",
-					"content-type": "application/json",
+			jsonPostRequest(
+				initializeBody,
+				{
+					...mcpHeaders,
 					authorization: `Bearer ${tokens.access_token}`,
 				},
-				body: JSON.stringify(initializeBody),
-			}),
+				MCP_URL,
+			),
 			env,
 			testExecutionContext,
 		);
@@ -1228,75 +1314,11 @@ describe("OAuth-enabled Worker fetch handler", () => {
 			createValidationClient: () => validationFactory(),
 		});
 
-		const registration = await handler(
-			new Request("https://worker.example/register", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({
-					redirect_uris: [redirectUri],
-					token_endpoint_auth_method: "none",
-				}),
-			}),
+		const tokens = await issueAccessTokenForValidationTest(
+			handler,
 			env,
-			testExecutionContext,
+			"soon-revoked-key",
 		);
-		const client = (await registration.json()) as { client_id: string };
-		const verifier = base64UrlEncode(
-			crypto.getRandomValues(new Uint8Array(32)),
-		);
-		const challenge = base64UrlEncode(
-			new Uint8Array(
-				await crypto.subtle.digest(
-					"SHA-256",
-					new TextEncoder().encode(verifier),
-				),
-			),
-		);
-		const authorizeUrl = new URL("https://worker.example/authorize");
-		authorizeUrl.searchParams.set("response_type", "code");
-		authorizeUrl.searchParams.set("client_id", client.client_id);
-		authorizeUrl.searchParams.set("redirect_uri", redirectUri);
-		authorizeUrl.searchParams.set("state", "s");
-		authorizeUrl.searchParams.set("code_challenge", challenge);
-		authorizeUrl.searchParams.set("code_challenge_method", "S256");
-		authorizeUrl.searchParams.set("resource", "https://worker.example");
-		const consentHtml = await (
-			await handler(new Request(authorizeUrl), env, testExecutionContext)
-		).text();
-		const encodedRequest = /name="oauth_request" value="([^"]+)"/.exec(
-			consentHtml,
-		)?.[1] as string;
-		const approval = await handler(
-			new Request("https://worker.example/authorize", {
-				method: "POST",
-				body: new URLSearchParams({
-					oauth_request: encodedRequest,
-					hevy_api_key: "soon-revoked-key",
-				}),
-			}),
-			env,
-			testExecutionContext,
-		);
-		const code = new URL(
-			approval.headers.get("location") as string,
-		).searchParams.get("code") as string;
-		const tokens = (await (
-			await handler(
-				new Request("https://worker.example/token", {
-					method: "POST",
-					body: new URLSearchParams({
-						grant_type: "authorization_code",
-						code,
-						redirect_uri: redirectUri,
-						client_id: client.client_id,
-						code_verifier: verifier,
-						resource: "https://worker.example",
-					}),
-				}),
-				env,
-				testExecutionContext,
-			)
-		).json()) as { access_token: string };
 
 		// The key gets revoked in Hevy after the grant was issued. Clear the
 		// validation cache entry the approval step above just wrote, so this
@@ -1306,14 +1328,14 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		}
 		validationFactory = revokedValidation;
 		const result = await handler(
-			new Request("https://worker.example/mcp", {
-				method: "POST",
-				headers: {
+			jsonPostRequest(
+				initializeBody,
+				{
 					"content-type": "application/json",
 					authorization: `Bearer ${tokens.access_token}`,
 				},
-				body: JSON.stringify(initializeBody),
-			}),
+				MCP_URL,
+			),
 			env,
 			testExecutionContext,
 		);
@@ -1342,73 +1364,11 @@ describe("OAuth-enabled Worker fetch handler", () => {
 			createValidationClient: () => validationFactory(),
 		});
 
-		const registration = await handler(
-			new Request("https://worker.example/register", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({
-					redirect_uris: [redirectUri],
-					token_endpoint_auth_method: "none",
-				}),
-			}),
+		const tokens = await issueAccessTokenForValidationTest(
+			handler,
 			env,
-			testExecutionContext,
+			"flaky-connection-key",
 		);
-		const client = (await registration.json()) as { client_id: string };
-		const verifier = base64UrlEncode(
-			crypto.getRandomValues(new Uint8Array(32)),
-		);
-		const challenge = base64UrlEncode(
-			new Uint8Array(
-				await crypto.subtle.digest(
-					"SHA-256",
-					new TextEncoder().encode(verifier),
-				),
-			),
-		);
-		const authorizeUrl = new URL("https://worker.example/authorize");
-		authorizeUrl.searchParams.set("response_type", "code");
-		authorizeUrl.searchParams.set("client_id", client.client_id);
-		authorizeUrl.searchParams.set("redirect_uri", redirectUri);
-		authorizeUrl.searchParams.set("state", "s");
-		authorizeUrl.searchParams.set("code_challenge", challenge);
-		authorizeUrl.searchParams.set("code_challenge_method", "S256");
-		const consentHtml = await (
-			await handler(new Request(authorizeUrl), env, testExecutionContext)
-		).text();
-		const encodedRequest = /name="oauth_request" value="([^"]+)"/.exec(
-			consentHtml,
-		)?.[1] as string;
-		const approval = await handler(
-			new Request("https://worker.example/authorize", {
-				method: "POST",
-				body: new URLSearchParams({
-					oauth_request: encodedRequest,
-					hevy_api_key: "flaky-connection-key",
-				}),
-			}),
-			env,
-			testExecutionContext,
-		);
-		const code = new URL(
-			approval.headers.get("location") as string,
-		).searchParams.get("code") as string;
-		const tokens = (await (
-			await handler(
-				new Request("https://worker.example/token", {
-					method: "POST",
-					body: new URLSearchParams({
-						grant_type: "authorization_code",
-						code,
-						redirect_uri: redirectUri,
-						client_id: client.client_id,
-						code_verifier: verifier,
-					}),
-				}),
-				env,
-				testExecutionContext,
-			)
-		).json()) as { access_token: string };
 
 		// Force a live validation call: the approval step above already cached
 		// this key as valid, which would otherwise mask the throw below.
@@ -1418,14 +1378,14 @@ describe("OAuth-enabled Worker fetch handler", () => {
 		validationFactory = throwingValidation;
 		const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const result = await handler(
-			new Request("https://worker.example/mcp", {
-				method: "POST",
-				headers: {
+			jsonPostRequest(
+				initializeBody,
+				{
 					"content-type": "application/json",
 					authorization: `Bearer ${tokens.access_token}`,
 				},
-				body: JSON.stringify(initializeBody),
-			}),
+				MCP_URL,
+			),
 			env,
 			testExecutionContext,
 		);

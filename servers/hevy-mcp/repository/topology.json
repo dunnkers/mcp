@@ -13,7 +13,7 @@
 			"private": true,
 			"publishable": false,
 			"runtime": "neutral",
-			"exports": [".", "./types", "./schemas"],
+			"exports": [".", "./types", "./schemas", "./internal"],
 			"dependencies": [],
 			"boundary": {
 				"allowed": {},
@@ -36,11 +36,11 @@
 			"private": true,
 			"publishable": false,
 			"runtime": "neutral",
-			"exports": ["."],
+			"exports": [".", "./schemas"],
 			"dependencies": ["hevy-client"],
 			"boundary": {
 				"allowed": {
-					"@hevy-mcp/hevy-client": ["", "types"]
+					"@hevy-mcp/hevy-client": ["", "types", "internal"]
 				},
 				"forbidden": [
 					"@cloudflare/",
@@ -61,12 +61,12 @@
 			"private": true,
 			"publishable": false,
 			"runtime": "neutral",
-			"exports": [".", "./mutations"],
+			"exports": ["."],
 			"dependencies": ["hevy-client", "operations"],
 			"boundary": {
 				"allowed": {
 					"@hevy-mcp/hevy-client": ["", "types", "schemas"],
-					"@hevy-mcp/operations": [""]
+					"@hevy-mcp/operations": ["", "schemas"]
 				},
 				"forbidden": [
 					"@cloudflare/",
@@ -113,7 +113,7 @@
 			"boundary": {
 				"allowed": {
 					"@hevy-mcp/core": [""],
-					"@hevy-mcp/hevy-client": [""]
+					"@hevy-mcp/hevy-client": ["", "internal"]
 				},
 				"forbidden": ["@sentry/", "@opentelemetry/"],
 				"rejectBuiltins": true,
@@ -130,12 +130,11 @@
 			"publishable": true,
 			"runtime": "node",
 			"exports": [],
-			"dependencies": ["hevy-client", "core", "operations"],
+			"dependencies": ["hevy-client", "operations"],
 			"boundary": {
 				"allowed": {
-					"@hevy-mcp/core": ["", "mutations"],
-					"@hevy-mcp/hevy-client": ["", "schemas"],
-					"@hevy-mcp/operations": [""]
+					"@hevy-mcp/hevy-client": ["", "types", "schemas"],
+					"@hevy-mcp/operations": ["", "schemas"]
 				},
 				"forbidden": ["@cloudflare/", "cloudflare:"],
 				"rejectBuiltins": false,
@@ -155,7 +154,7 @@
 		"bundles": [
 			{
 				"workspace": "hevy-client",
-				"consumers": ["operations", "core"]
+				"consumers": ["operations", "core", "node", "worker", "cli"]
 			},
 			{
 				"workspace": "operations",
@@ -163,7 +162,7 @@
 			},
 			{
 				"workspace": "core",
-				"consumers": ["node", "worker", "cli"]
+				"consumers": ["node", "worker"]
 			}
 		]
 	}
